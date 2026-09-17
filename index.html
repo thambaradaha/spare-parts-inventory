@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spare Parts Inventory</title>
+
+    <!-- Charting -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Camera barcode/QR scanning -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <!-- Client-side QR code image generation -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <!-- Client-side Excel read/write (stock-check parsing + requisition export) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Client-side PDF text extraction (for "Scan for Parts") -->
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    <!-- Client-side OCR fallback for scanned (image-only) manuals -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <!-- Supabase client -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Header -->
+    <div class="header-top">
+        <div class="header-title">
+            <span style="border: 1px solid var(--accent); padding: 2px 5px; font-size: 12px;">SP</span>
+            SPARE PARTS INVENTORY
+        </div>
+        <select id="global-machine-select" onchange="loadAllData()">
+            <option value="all">All machines</option>
+        </select>
+    </div>
+
+    <!-- Stats -->
+    <div class="dashboard-stats">
+        <div class="stat-box">
+            <div class="stat-label">Total Parts</div>
+            <div class="stat-value" id="stat-total">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Low Stock</div>
+            <div class="stat-value warning" id="stat-low">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Machines</div>
+            <div class="stat-value" id="stat-machines">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Open Breakdowns</div>
+            <div class="stat-value danger" id="stat-breakdowns">0</div>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <div class="nav-bar">
+        <div class="nav-item active" onclick="switchTab('parts')">PARTS</div>
+        <div class="nav-item" onclick="switchTab('low-stock')">LOW STOCK</div>
+        <div class="nav-item" onclick="switchTab('breakdowns')">BREAKDOWNS</div>
+        <div class="nav-item" onclick="switchTab('failure-frequency')">FAILURE FREQUENCY</div>
+        <div class="nav-item" onclick="switchTab('machines')">MACHINES</div>
+        <div class="nav-item" onclick="switchTab('manuals')">MANUALS</div>
+        <div class="nav-item" onclick="switchTab('stock-check')">STOCK CHECK</div>
+        <div class="nav-item" onclick="switchTab('add-machine')">ADD MACHINE / MANUAL</div>
+    </div>
+
+    <!-- Parts Tab -->
+    <div id="tab-parts" class="tab-content active">
+        <div style="display: flex; gap: 10px; margin-bottom: 20px; justify-content: space-between;">
+            <div style="display: flex; gap: 10px;">
+                <input type="text" id="part-search-input" placeholder="Search part code or description..." style="width: 300px;" onkeyup="loadInventory()">
+                <button class="btn-secondary" onclick="openScanner('part-search-input')">📷 Scan Barcode</button>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn-danger" onclick="bulkDeleteParts()" id="bulk-delete-parts-btn" style="display:none;">Delete Selected (0)</button>
+                <button class="btn-primary" onclick="toggleAddPartForm()" id="add-part-toggle-btn">+ Add Part</button>
+            </div>
+        </div>
+
+        <div class="form-panel" id="add-part-form" style="display: none;">
+            <h3 style="margin-top:0;">ADD A PART</h3>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;"><label>PART CODE *</label><input type="text" id="add-p-code"></div>
+                <div class="form-group" style="flex:2;"><label>DESCRIPTION</label><input type="text" id="add-p-desc"></div>
+                <div class="form-group" style="flex:1;"><label>LOCATION</label><input type="text" id="add-p-location" placeholder="e.g. Rack A3"></div>
+            </div>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;"><label>STOCK QTY</label><input type="number" id="add-p-stock" value="0"></div>
+                <div class="form-group" style="flex:1;"><label>REORDER LEVEL</label><input type="number" id="add-p-reorder" value="0"></div>
+                <div class="form-group" style="flex:1;"><label>UNIT COST</label><input type="number" step="0.01" id="add-p-cost" value="0"></div>
+                <div class="form-group" style="flex:1;"><label>UoM</label><input type="text" id="add-p-uom" value="Nos"></div>
+            </div>
+            <button class="btn-primary" onclick="addPart()">Save part</button>
+        </div>
+
+        <table>
+            <thead><tr><th><input type="checkbox" id="parts-select-all" onchange="toggleSelectAllParts(this.checked)"></th><th>CODE</th><th>DESCRIPTION</th><th>UoM</th><th>STOCK</th><th>REORDER LVL</th><th>COST</th><th>QR</th><th>ACTION</th></tr></thead>
+            <tbody id="parts-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Low Stock Tab -->
+    <div id="tab-low-stock" class="tab-content">
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 15px;">
+            <button class="btn-primary" onclick="exportRequisition()">Export Requisition (.xlsx)</button>
+        </div>
+        <table>
+            <thead><tr><th>CODE</th><th>DESCRIPTION</th><th>STOCK</th><th>REORDER LVL</th><th>DEFICIT</th></tr></thead>
+            <tbody id="low-stock-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Breakdowns Tab -->
+    <div id="tab-breakdowns" class="tab-content">
+        <div class="form-panel">
+            <h3 style="margin-top:0;">LOG A BREAKDOWN</h3>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;">
+                    <label>MACHINE</label>
+                    <select id="bd-machine"></select>
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label>PART CODE (OPTIONAL)</label>
+                    <div style="display: flex; gap: 5px;">
+                        <input type="text" id="bd-part" placeholder="type to search...">
+                        <button class="btn-secondary" onclick="openScanner('bd-part')" style="padding: 0 10px;">📷</button>
+                    </div>
+                </div>
+                <div class="form-group" style="flex:0.5;">
+                    <label>QTY USED</label>
+                    <input type="number" id="bd-qty" value="0">
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label>REPORTED BY</label>
+                    <input type="text" id="bd-reporter">
+                </div>
+            </div>
+            <div class="form-group">
+                <input type="text" id="bd-desc" placeholder="Describe the breakdown...">
+            </div>
+            <button class="btn-primary" onclick="logBreakdown()">Log breakdown</button>
+        </div>
+        <table>
+            <thead><tr><th>REPORTED</th><th>MACHINE</th><th>PART</th><th>DESCRIPTION</th><th>STATUS</th><th>ACTION</th></tr></thead>
+            <tbody id="breakdowns-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Failure Frequency Tab -->
+    <div id="tab-failure-frequency" class="tab-content">
+        <div style="width: 100%; max-width: 900px; margin: 0 auto 20px auto; background: var(--panel-bg); padding: 15px; border-radius: 4px;">
+            <canvas id="paretoChart"></canvas>
+        </div>
+        <table>
+            <thead><tr><th>PART CODE</th><th>DESCRIPTION</th><th>MACHINE</th><th>FAILURES</th><th>MTBF (DAYS)</th></tr></thead>
+            <tbody id="failure-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Machines Tab -->
+    <div id="tab-machines" class="tab-content">
+        <table>
+            <thead><tr><th>NAME</th><th>MODEL</th><th>SERIAL</th><th>MANUFACTURER</th><th>YEAR</th><th>ACTION</th></tr></thead>
+            <tbody id="machines-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Manuals Tab -->
+    <div id="tab-manuals" class="tab-content">
+        <table>
+            <thead><tr><th>MACHINE</th><th>FILENAME</th><th>VOLUME LABEL</th><th>UPLOADED AT</th><th>ACTION</th></tr></thead>
+            <tbody id="manuals-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- Stock Check Tab -->
+    <div id="tab-stock-check" class="tab-content">
+        <div class="form-panel">
+            <h3 style="margin-top:0;">FULL STOCK LIST (EXCEL)</h3>
+            <p style="color: var(--text-muted); font-size: 13px; margin-top: -6px;">
+                Download the full inventory as a spreadsheet, edit it (update stock counts, reorder levels, cost,
+                location, or add new rows for new parts), then upload it back here to review the changes before
+                applying them.
+            </p>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <button class="btn-primary" onclick="downloadStockListXlsx()">Download Stock List (.xlsx)</button>
+                <input type="file" id="stock-list-file" accept=".xlsx">
+                <button class="btn-secondary" onclick="compareStockList()" id="compare-stock-list-btn">Compare & Preview Changes</button>
+            </div>
+        </div>
+        <div id="stock-list-results" style="margin-bottom: 20px;"></div>
+
+        <div class="form-panel">
+            <h3 style="margin-top:0;">UPLOAD WAREHOUSE COUNT</h3>
+            <p style="color: var(--text-muted); font-size: 13px; margin-top: -6px;">
+                Quicker option for a physical count: just a list of codes (and optionally names/descriptions) with
+                quantities — matched against inventory by code first, then by description if the code doesn't match.
+            </p>
+            <input type="file" id="stock-file" accept=".csv, .txt, .xlsx">
+            <button class="btn-primary" onclick="uploadStockCheck()" id="analyze-file-btn">Analyze File</button>
+        </div>
+        <div id="stock-results"></div>
+    </div>
+
+    <!-- Add Machine / Manual Tab -->
+    <div id="tab-add-machine" class="tab-content">
+        <div class="form-panel">
+            <h3 style="margin-top:0;">ADD A MACHINE</h3>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;"><label>NAME *</label><input type="text" id="add-m-name"></div>
+                <div class="form-group" style="flex:1;"><label>MODEL</label><input type="text" id="add-m-model"></div>
+                <div class="form-group" style="flex:1;"><label>SERIAL NUMBER</label><input type="text" id="add-m-serial"></div>
+            </div>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;"><label>MANUFACTURER</label><input type="text" id="add-m-manufacturer"></div>
+                <div class="form-group" style="flex:1;"><label>YEAR BUILT</label><input type="number" id="add-m-year"></div>
+                <div class="form-group" style="flex:1;"><label>NOTES</label><input type="text" id="add-m-notes"></div>
+            </div>
+            <button class="btn-primary" onclick="addMachine()">Add machine</button>
+        </div>
+
+        <div class="form-panel">
+            <h3 style="margin-top:0;">UPLOAD A MANUAL (PDF)</h3>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;">
+                    <label>MACHINE *</label>
+                    <select id="manual-machine"></select>
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label>VOLUME LABEL</label>
+                    <input type="text" id="manual-volume" placeholder="e.g. Vol. 1 - Electrical">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>PDF FILE *</label>
+                <input type="file" id="manual-file" accept=".pdf">
+            </div>
+            <div class="form-group" id="manual-upload-progress-wrap" style="display:none;">
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="manual-upload-progress-fill" style="width:0%;"></div>
+                </div>
+                <div id="manual-upload-progress-text" style="font-size:12px; color: var(--text-muted); margin-top:6px;">Uploading... 0%</div>
+            </div>
+            <button class="btn-primary" onclick="uploadManual()" id="upload-manual-btn">Upload manual</button>
+        </div>
+    </div>
+
+    <!-- PDF Viewer Modal -->
+    <div id="pdf-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999;">
+        <div style="position: absolute; top: 20px; right: 20px;">
+            <button onclick="closePdfViewer()" class="btn-primary" style="background: var(--danger);">Close Viewer</button>
+        </div>
+        <div style="width: 90%; height: 90%; margin: 3% auto; background: #fff; border-radius: 4px; overflow: hidden;">
+            <iframe id="pdf-iframe" src="" width="100%" height="100%" style="border: none;"></iframe>
+        </div>
+    </div>
+
+    <!-- QR Scanner Modal -->
+    <div id="scanner-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center;">
+        <div style="background: var(--panel-bg); padding: 20px; border-radius: 8px; width: 100%; max-width: 500px; text-align: center;">
+            <h3 style="color: var(--accent); margin-top: 0;">Scan Part Code</h3>
+            <div id="reader" style="width: 100%; margin-bottom: 20px;"></div>
+            <button onclick="closeScanner()" class="btn-primary" style="background: var(--danger);">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Parts Review Modal (from PDF scan) -->
+    <div id="parts-review-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
+        <div style="background: var(--panel-bg); padding: 20px; border-radius: 8px; width: 95%; max-width: 1150px; max-height: 85vh; overflow-y: auto;">
+            <h3 style="color: var(--accent); margin-top: 0;">Scan Results — Candidate Spare Parts</h3>
+            <p id="parts-review-status" style="color: var(--text-muted); font-size: 13px;"></p>
+            <div id="ocr-progress-wrap" style="display:none; margin-bottom: 15px;">
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="ocr-progress-fill" style="width:0%;"></div>
+                </div>
+            </div>
+            <div style="display:flex; gap:10px; margin-bottom:10px;">
+                <button class="btn-secondary" onclick="selectAllCandidates(true)">Select All</button>
+                <button class="btn-secondary" onclick="selectAllCandidates(false)">Select None</button>
+            </div>
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead><tr><th></th><th>POS.</th><th>MANUAL CODE</th><th>DESCRIPTION</th><th>SAP CODE</th><th>QUANT.</th><th>CONFIDENCE</th><th>MATCH</th><th></th></tr></thead>
+                    <tbody id="parts-review-tbody"></tbody>
+                </table>
+            </div>
+            <div style="display:flex; gap:10px; margin-top:15px; justify-content:space-between; align-items:center;">
+                <div id="parts-review-actions-left"></div>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn-secondary" onclick="closePartsReviewModal()">Cancel</button>
+                    <button class="btn-primary" onclick="confirmAddCandidateParts()">Add Selected to Inventory</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
