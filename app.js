@@ -1,7 +1,16 @@
 // ---------------------------------------------------------------------------
 // Supabase client
 // ---------------------------------------------------------------------------
-const supabaseClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+// ---------------------------------------------------------------------------
+// Adaptive Supabase client (Works on Localhost and Live Production Host)
+// ---------------------------------------------------------------------------
+const supabaseUrl = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_URL) 
+    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_URL : "YOUR_FALLBACK_URL");
+
+const supabaseKey = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY) 
+    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_ANON_KEY : "YOUR_FALLBACK_KEY");
+
+const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
 
 let currentTab = 'parts';
 let paretoChartInstance = null;
