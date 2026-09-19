@@ -1,16 +1,7 @@
 // ---------------------------------------------------------------------------
 // Supabase client
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Adaptive Supabase client (Works on Localhost and Live Production Host)
-// ---------------------------------------------------------------------------
-const supabaseUrl = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_URL) 
-    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_URL : "YOUR_FALLBACK_URL");
-
-const supabaseKey = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY) 
-    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_ANON_KEY : "YOUR_FALLBACK_KEY");
-
-const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
+const supabaseClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
 
 let currentTab = 'parts';
 let paretoChartInstance = null;
@@ -354,6 +345,203 @@ function toggleAddPartForm() {
     const isHidden = form.style.display === 'none';
     form.style.display = isHidden ? 'block' : 'none';
     document.getElementById('add-part-toggle-btn').innerText = isHidden ? 'Cancel' : '+ Add Part';
+}
+
+// ---------------------------------------------------------------------------
+// Bulk Add Parts from Excel — adds new parts only. For updating existing
+// inventory in bulk, use the Full Stock List round-trip on the Stock Check tab.
+// ---------------------------------------------------------------------------
+let lastBulkAddRows = [];
+
+function toggleBulkAddForm() {
+    const form = document.getElementById('bulk-add-excel-form');
+    const isHidden = form.style.display === 'none';
+    form.style.display = isHidden ? 'block' : 'none';
+    document.getElementById('bulk-add-toggle-btn').innerText = isHidden ? 'Cancel' : '+ Bulk Add (Excel)';
+    if (!isHidden) document.getElementById('bulk-add-results').innerHTML = '';
+}
+
+function detectColumnIndex(headerCells, aliases) {
+    const normalized = headerCells.map(h => normalizeText(h));
+    for (const alias of aliases) {
+        const idx = normalized.indexOf(normalizeText(alias));
+        if (idx !== -1) return idx;
+    }
+    return -1;
+}
+
+async function previewBulkAdd() {
+    const fileInput = document.getElementById('bulk-add-file');
+    if (!fileInput.files.length) { alert('Please choose a file.'); return; }
+    const file = fileInput.files[0];
+    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+
+    const resultsDiv = document.getElementById('bulk-add-results');
+    const btn = document.getElementById('bulk-add-preview-btn');
+    btn.disabled = true;
+    btn.innerText = 'Reading...';
+    resultsDiv.innerHTML = '<p style="color: var(--text-muted);">Reading file...</p>';
+
+    let rows;
+    try {
+        if (ext === 'xlsx' || ext === 'xlsm') {
+            const buf = await file.arrayBuffer();
+            const wb = XLSX.read(buf, { type: 'array' });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        } else {
+            rows = parseCsvText(await file.text());
+        }
+    } catch (err) {
+        resultsDiv.innerHTML = `<p style="color: var(--danger);">Error reading file: ${err.message}</p>`;
+        btn.disabled = false;
+        btn.innerText = 'Preview';
+        return;
+    }
+
+    // Auto-detect a header row within the first few rows; fall back to a fixed
+    // column order (Code, Description, UoM, Stock, Reorder, Cost, Location) if
+    // nothing recognizable is found — covers both this app's own export and
+    // arbitrary company sheets like the "Item No. / Description / UoM / Qty" format.
+    let headerRowIdx = -1;
+    let colIdx = { code: 0, description: 1, uom: 2, stock: 3, reorder: 4, cost: 5, location: 6 };
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+        const cells = rows[i].map(c => String(c || '').trim());
+        const codeIdx = detectColumnIndex(cells, ['part code', 'code', 'item no', 'item no.', 'sap code', 'part_code']);
+        if (codeIdx !== -1) {
+            headerRowIdx = i;
+            colIdx = {
+                code: codeIdx,
+                description: detectColumnIndex(cells, ['description', 'name', 'item description']),
+                uom: detectColumnIndex(cells, ['uom', 'unit', 'unit of measure']),
+                stock: detectColumnIndex(cells, ['stock qty', 'quantity', 'qty', 'cumulative qty', 'stock']),
+                reorder: detectColumnIndex(cells, ['reorder level', 'reorder']),
+                cost: detectColumnIndex(cells, ['unit cost', 'cost', 'price']),
+                location: detectColumnIndex(cells, ['location'])
+            };
+            break;
+        }
+    }
+    const dataRows = headerRowIdx >= 0 ? rows.slice(headerRowIdx + 1) : rows;
+
+    const { data: existingParts } = await supabaseClient.from('parts').select('id, part_code, description');
+    const byNorm = {};
+    (existingParts || []).forEach(p => { byNorm[normalizeCode(p.part_code)] = p; });
+
+    const parsed = [];
+    dataRows.forEach(row => {
+        const cells = row.map(c => (c === null || c === undefined) ? '' : String(c).trim());
+        const code = colIdx.code >= 0 ? cells[colIdx.code] : '';
+        if (!code) return;
+
+        const description = colIdx.description >= 0 ? cells[colIdx.description] : '';
+        const uom = colIdx.uom >= 0 && cells[colIdx.uom] ? cells[colIdx.uom] : 'Nos';
+        const stock = colIdx.stock >= 0 && cells[colIdx.stock] !== '' && !isNaN(parseInt(cells[colIdx.stock], 10)) ? parseInt(cells[colIdx.stock], 10) : 0;
+        const reorder = colIdx.reorder >= 0 && cells[colIdx.reorder] !== '' && !isNaN(parseInt(cells[colIdx.reorder], 10)) ? parseInt(cells[colIdx.reorder], 10) : 0;
+        const cost = colIdx.cost >= 0 && cells[colIdx.cost] !== '' && !isNaN(parseFloat(cells[colIdx.cost])) ? parseFloat(cells[colIdx.cost]) : 0;
+        const location = colIdx.location >= 0 ? cells[colIdx.location] : '';
+
+        const norm = normalizeCode(code);
+        const exact = byNorm[norm];
+        const embedded = !exact ? findMatchInDescriptions(code, existingParts || []) : null;
+        const duplicate = exact || embedded;
+
+        parsed.push({
+            code, description, uom, stock, reorder, cost, location,
+            duplicateOf: duplicate ? duplicate.part_code : null,
+            duplicateVia: exact ? 'code' : (embedded ? 'description' : null)
+        });
+    });
+
+    lastBulkAddRows = parsed;
+    btn.disabled = false;
+    btn.innerText = 'Preview';
+
+    if (parsed.length === 0) {
+        resultsDiv.innerHTML = '<p style="color: var(--text-muted);">No rows with a code found in this file.</p>';
+        return;
+    }
+
+    let html = `
+        <p style="color: var(--text-muted); font-size: 13px;">
+            ${parsed.length} row(s) found${headerRowIdx >= 0 ? '' : ' — no header row detected, so column order was assumed to be Code, Description, UoM, Stock, Reorder, Cost, Location'}.
+            Rows already in inventory are unchecked by default.
+        </p>
+        <div style="margin-bottom: 15px; display:flex; gap:10px;">
+            <button class="btn-secondary" onclick="selectAllBulkAdd(true)">Select All</button>
+            <button class="btn-secondary" onclick="selectAllBulkAdd(false)">Select None</button>
+            <button class="btn-primary" onclick="applyBulkAdd()">Add Selected Parts</button>
+        </div>
+        <div style="overflow-x:auto;">
+        <table>
+            <thead><tr><th></th><th>CODE</th><th>DESCRIPTION</th><th>UoM</th><th>STOCK</th><th>REORDER</th><th>COST</th><th>LOCATION</th><th>STATUS</th></tr></thead>
+            <tbody>
+    `;
+    parsed.forEach((r, idx) => {
+        const checked = !r.duplicateOf;
+        html += `<tr>
+            <td><input type="checkbox" class="bulk-add-checkbox" data-idx="${idx}" ${checked ? 'checked' : ''}></td>
+            <td><input type="text" class="bulk-add-code" data-idx="${idx}" value="${r.code.replace(/"/g, '&quot;')}" style="width:110px;"></td>
+            <td><input type="text" class="bulk-add-desc" data-idx="${idx}" value="${(r.description || '').replace(/"/g, '&quot;')}" style="width:200px;"></td>
+            <td><input type="text" class="bulk-add-uom" data-idx="${idx}" value="${r.uom}" style="width:55px;"></td>
+            <td><input type="number" class="bulk-add-stock" data-idx="${idx}" value="${r.stock}" style="width:60px;"></td>
+            <td><input type="number" class="bulk-add-reorder" data-idx="${idx}" value="${r.reorder}" style="width:60px;"></td>
+            <td><input type="number" step="0.01" class="bulk-add-cost" data-idx="${idx}" value="${r.cost}" style="width:70px;"></td>
+            <td><input type="text" class="bulk-add-location" data-idx="${idx}" value="${(r.location || '').replace(/"/g, '&quot;')}" style="width:90px;"></td>
+            <td>${r.duplicateOf ? `<span class="badge fuzzy">exists (${r.duplicateOf}${r.duplicateVia === 'description' ? ', via desc' : ''})</span>` : `<span class="badge exact">new</span>`}</td>
+        </tr>`;
+    });
+    html += `</tbody></table></div>`;
+    resultsDiv.innerHTML = html;
+}
+
+function selectAllBulkAdd(checked) {
+    document.querySelectorAll('.bulk-add-checkbox').forEach(cb => { cb.checked = checked; });
+}
+
+async function applyBulkAdd() {
+    const rows = document.querySelectorAll('#bulk-add-results tbody tr');
+    const toInsert = [];
+    rows.forEach(row => {
+        if (!row.querySelector('.bulk-add-checkbox').checked) return;
+        const code = row.querySelector('.bulk-add-code').value.trim();
+        if (!code) return;
+        toInsert.push({
+            part_code: code,
+            description: row.querySelector('.bulk-add-desc').value.trim() || null,
+            uom: row.querySelector('.bulk-add-uom').value.trim() || 'Nos',
+            stock_qty: parseInt(row.querySelector('.bulk-add-stock').value, 10) || 0,
+            reorder_level: parseInt(row.querySelector('.bulk-add-reorder').value, 10) || 0,
+            unit_cost: parseFloat(row.querySelector('.bulk-add-cost').value) || 0,
+            location: row.querySelector('.bulk-add-location').value.trim() || null
+        });
+    });
+
+    if (toInsert.length === 0) { alert('Select at least one part to add.'); return; }
+
+    // Guard against duplicate codes within the uploaded sheet itself
+    const seen = new Set();
+    const deduped = toInsert.filter(p => {
+        const norm = normalizeCode(p.part_code);
+        if (seen.has(norm)) return false;
+        seen.add(norm);
+        return true;
+    });
+
+    if (!confirm(`Add ${deduped.length} new part(s) to inventory?`)) return;
+
+    let added = 0, failed = 0;
+    for (const payload of deduped) {
+        const { error } = await supabaseClient.from('parts').insert(payload);
+        if (error) { failed++; console.error(error.message); } else added++;
+    }
+
+    alert(`Added ${added} part(s)` + (failed ? `, ${failed} failed (see browser console — likely a duplicate code already in inventory).` : '.'));
+    document.getElementById('bulk-add-results').innerHTML = '';
+    document.getElementById('bulk-add-file').value = '';
+    toggleBulkAddForm();
+    loadInventory();
+    loadStats();
 }
 
 async function addPart() {

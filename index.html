@@ -76,9 +76,26 @@
             </div>
             <div style="display: flex; gap: 10px;">
                 <button class="btn-danger" onclick="bulkDeleteParts()" id="bulk-delete-parts-btn" style="display:none;">Delete Selected (0)</button>
+                <button class="btn-secondary" onclick="toggleBulkAddForm()" id="bulk-add-toggle-btn">+ Bulk Add (Excel)</button>
                 <button class="btn-primary" onclick="toggleAddPartForm()" id="add-part-toggle-btn">+ Add Part</button>
             </div>
         </div>
+
+        <div class="form-panel" id="bulk-add-excel-form" style="display: none;">
+            <h3 style="margin-top:0;">BULK ADD PARTS FROM EXCEL</h3>
+            <p style="color: var(--text-muted); font-size: 13px; margin-top: -6px;">
+                Upload a spreadsheet of parts to add — works with your Stock List export, or any sheet with
+                columns like Code, Description, UoM, Stock Qty, Reorder Level, Unit Cost, Location (a header row
+                is auto-detected; missing columns just default to blank/zero). Rows that already exist in
+                inventory — matched by code or found embedded in an existing description — are flagged and
+                unchecked by default so you don't create duplicates.
+            </p>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <input type="file" id="bulk-add-file" accept=".xlsx, .csv">
+                <button class="btn-secondary" onclick="previewBulkAdd()" id="bulk-add-preview-btn">Preview</button>
+            </div>
+        </div>
+        <div id="bulk-add-results" style="margin-bottom: 20px;"></div>
 
         <div class="form-panel" id="add-part-form" style="display: none;">
             <h3 style="margin-top:0;">ADD A PART</h3>
@@ -301,3 +318,263 @@
     <script src="app.js"></script>
 </body>
 </html>
+warning: in the working copy of 'app.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'index.html', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/app.js b/app.js[m
+[1mindex 07d7f45..23ed71f 100644[m
+[1m--- a/app.js[m
+[1m+++ b/app.js[m
+[36m@@ -1,16 +1,7 @@[m
+ // ---------------------------------------------------------------------------[m
+ // Supabase client[m
+ // ---------------------------------------------------------------------------[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// Adaptive Supabase client (Works on Localhost and Live Production Host)[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-const supabaseUrl = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_URL) [m
+[31m-    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_URL : "YOUR_FALLBACK_URL");[m
+[31m-[m
+[31m-const supabaseKey = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY) [m
+[31m-    || (typeof CONFIG !== 'undefined' ? CONFIG.SUPABASE_ANON_KEY : "YOUR_FALLBACK_KEY");[m
+[31m-[m
+[31m-const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);[m
+[32m+[m[32mconst supabaseClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);[m
+ [m
+ let currentTab = 'parts';[m
+ let paretoChartInstance = null;[m
+[36m@@ -356,6 +347,203 @@[m [mfunction toggleAddPartForm() {[m
+     document.getElementById('add-part-toggle-btn').innerText = isHidden ? 'Cancel' : '+ Add Part';[m
+ }[m
+ [m
+[32m+[m[32m// ---------------------------------------------------------------------------[m
+[32m+[m[32m// Bulk Add Parts from Excel — adds new parts only. For updating existing[m
+[32m+[m[32m// inventory in bulk, use the Full Stock List round-trip on the Stock Check tab.[m
+[32m+[m[32m// ---------------------------------------------------------------------------[m
+[32m+[m[32mlet lastBulkAddRows = [];[m
+[32m+[m
+[32m+[m[32mfunction toggleBulkAddForm() {[m
+[32m+[m[32m    const form = document.getElementById('bulk-add-excel-form');[m
+[32m+[m[32m    const isHidden = form.style.display === 'none';[m
+[32m+[m[32m    form.style.display = isHidden ? 'block' : 'none';[m
+[32m+[m[32m    document.getElementById('bulk-add-toggle-btn').innerText = isHidden ? 'Cancel' : '+ Bulk Add (Excel)';[m
+[32m+[m[32m    if (!isHidden) document.getElementById('bulk-add-results').innerHTML = '';[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction detectColumnIndex(headerCells, aliases) {[m
+[32m+[m[32m    const normalized = headerCells.map(h => normalizeText(h));[m
+[32m+[m[32m    for (const alias of aliases) {[m
+[32m+[m[32m        const idx = normalized.indexOf(normalizeText(alias));[m
+[32m+[m[32m        if (idx !== -1) return idx;[m
+[32m+[m[32m    }[m
+[32m+[m[32m    return -1;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function previewBulkAdd() {[m
+[32m+[m[32m    const fileInput = document.getElementById('bulk-add-file');[m
+[32m+[m[32m    if (!fileInput.files.length) { alert('Please choose a file.'); return; }[m
+[32m+[m[32m    const file = fileInput.files[0];[m
+[32m+[m[32m    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';[m
+[32m+[m
+[32m+[m[32m    const resultsDiv = document.getElementById('bulk-add-results');[m
+[32m+[m[32m    const btn = document.getElementById('bulk-add-preview-btn');[m
+[32m+[m[32m    btn.disabled = true;[m
+[32m+[m[32m    btn.innerText = 'Reading...';[m
+[32m+[m[32m    resultsDiv.innerHTML = '<p style="color: var(--text-muted);">Reading file...</p>';[m
+[32m+[m
+[32m+[m[32m    let rows;[m
+[32m+[m[32m    try {[m
+[32m+[m[32m        if (ext === 'xlsx' || ext === 'xlsm') {[m
+[32m+[m[32m            const buf = await file.arrayBuffer();[m
+[32m+[m[32m            const wb = XLSX.read(buf, { type: 'array' });[m
+[32m+[m[32m            const ws = wb.Sheets[wb.SheetNames[0]];[m
+[32m+[m[32m            rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });[m
+[32m+[m[32m        } else {[m
+[32m+[m[32m            rows = parseCsvText(await file.text());[m
+[32m+[m[32m        }[m
+[32m+[m[32m    } catch (err) {[m
+[32m+[m[32m        resultsDiv.innerHTML = `<p style="color: var(--danger);">Error reading file: ${err.message}</p>`;[m
+[32m+[m[32m        btn.disabled = false;[m
+[32m+[m[32m        btn.innerText = 'Preview';[m
+[32m+[m[32m        return;[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    // Auto-detect a header row within the first few rows; fall back to a fixed[m
+[32m+[m[32m    // column order (Code, Description, UoM, Stock, Reorder, Cost, Location) if[m
+[32m+[m[32m    // nothing recognizable is found — covers both this app's own export and[m
+[32m+[m[32m    // arbitrary company sheets like the "Item No. / Description / UoM / Qty" format.[m
+[32m+[m[32m    let headerRowIdx = -1;[m
+[32m+[m[32m    let colIdx = { code: 0, description: 1, uom: 2, stock: 3, reorder: 4, cost: 5, location: 6 };[m
+[32m+[m[32m    for (let i = 0; i < Math.min(rows.length, 5); i++) {[m
+[32m+[m[32m        const cells = rows[i].map(c => String(c || '').trim());[m
+[32m+[m[32m        const codeIdx = detectColumnIndex(cells, ['part code', 'code', 'item no', 'item no.', 'sap code', 'part_code']);[m
+[32m+[m[32m        if (codeIdx !== -1) {[m
+[32m+[m[32m            headerRowIdx = i;[m
+[32m+[m[32m            colIdx = {[m
+[32m+[m[32m                code: codeIdx,[m
+[32m+[m[32m                description: detectColumnIndex(cells, ['description', 'name', 'item description']),[m
+[32m+[m[32m                uom: detectColumnIndex(cells, ['uom', 'unit', 'unit of measure']),[m
+[32m+[m[32m                stock: detectColumnIndex(cells, ['stock qty', 'quantity', 'qty', 'cumulative qty', 'stock']),[m
+[32m+[m[32m                reorder: detectColumnIndex(cells, ['reorder level', 'reorder']),[m
+[32m+[m[32m                cost: detectColumnIndex(cells, ['unit cost', 'cost', 'price']),[m
+[32m+[m[32m                location: detectColumnIndex(cells, ['location'])[m
+[32m+[m[32m            };[m
+[32m+[m[32m            break;[m
+[32m+[m[32m        }[m
+[32m+[m[32m    }[m
+[32m+[m[32m    const dataRows = headerRowIdx >= 0 ? rows.slice(headerRowIdx + 1) : rows;[m
+[32m+[m
+[32m+[m[32m    const { data: existingParts } = await supabaseClient.from('parts').select('id, part_code, description');[m
+[32m+[m[32m    const byNorm = {};[m
+[32m+[m[32m    (existingParts || []).forEach(p => { byNorm[normalizeCode(p.part_code)] = p; });[m
+[32m+[m
+[32m+[m[32m    const parsed = [];[m
+[32m+[m[32m    dataRows.forEach(row => {[m
+[32m+[m[32m        const cells = row.map(c => (c === null || c === undefined) ? '' : String(c).trim());[m
+[32m+[m[32m        const code = colIdx.code >= 0 ? cells[colIdx.code] : '';[m
+[32m+[m[32m        if (!code) return;[m
+[32m+[m
+[32m+[m[32m        const description = colIdx.description >= 0 ? cells[colIdx.description] : '';[m
+[32m+[m[32m        const uom = colIdx.uom >= 0 && cells[colIdx.uom] ? cells[colIdx.uom] : 'Nos';[m
+[32m+[m[32m        const stock = colIdx.stock >= 0 && cells[colIdx.stock] !== '' && !isNaN(parseInt(cells[colIdx.stock], 10)) ? parseInt(cells[colIdx.stock], 10) : 0;[m
+[32m+[m[32m        const reorder = colIdx.reorder >= 0 && cells[colIdx.reorder] !== '' && !isNaN(parseInt(cells[colIdx.reorder], 10)) ? parseInt(cells[colIdx.reorder], 10) : 0;[m
+[32m+[m[32m        const cost = colIdx.cost >= 0 && cells[colIdx.cost] !== '' && !isNaN(parseFloat(cells[colIdx.cost])) ? parseFloat(cells[colIdx.cost]) : 0;[m
+[32m+[m[32m        const location = colIdx.location >= 0 ? cells[colIdx.location] : '';[m
+[32m+[m
+[32m+[m[32m        const norm = normalizeCode(code);[m
+[32m+[m[32m        const exact = byNorm[norm];[m
+[32m+[m[32m        const embedded = !exact ? findMatchInDescriptions(code, existingParts || []) : null;[m
+[32m+[m[32m        const duplicate = exact || embedded;[m
+[32m+[m
+[32m+[m[32m        parsed.push({[m
+[32m+[m[32m            code, description, uom, stock, reorder, cost, location,[m
+[32m+[m[32m            duplicateOf: duplicate ? duplicate.part_code : null,[m
+[32m+[m[32m            duplicateVia: exact ? 'code' : (embedded ? 'description' : null)[m
+[32m+[m[32m        });[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    lastBulkAddRows = parsed;[m
+[32m+[m[32m    btn.disabled = false;[m
+[32m+[m[32m    btn.innerText = 'Preview';[m
+[32m+[m
+[32m+[m[32m    if (parsed.length === 0) {[m
+[32m+[m[32m        resultsDiv.innerHTML = '<p style="color: var(--text-muted);">No rows with a code found in this file.</p>';[m
+[32m+[m[32m        return;[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    let html = `[m
+[32m+[m[32m        <p style="color: var(--text-muted); font-size: 13px;">[m
+[32m+[m[32m            ${parsed.length} row(s) found${headerRowIdx >= 0 ? '' : ' — no header row detected, so column order was assumed to be Code, Description, UoM, Stock, Reorder, Cost, Location'}.[m
+[32m+[m[32m            Rows already in inventory are unchecked by default.[m
+[32m+[m[32m        </p>[m
+[32m+[m[32m        <div style="margin-bottom: 15px; display:flex; gap:10px;">[m
+[32m+[m[32m            <button class="btn-secondary" onclick="selectAllBulkAdd(true)">Select All</button>[m
+[32m+[m[32m            <button class="btn-secondary" onclick="selectAllBulkAdd(false)">Select None</button>[m
+[32m+[m[32m            <button class="btn-primary" onclick="applyBulkAdd()">Add Selected Parts</button>[m
+[32m+[m[32m        </div>[m
+[32m+[m[32m        <div style="overflow-x:auto;">[m
+[32m+[m[32m        <table>[m
+[32m+[m[32m            <thead><tr><th></th><th>CODE</th><th>DESCRIPTION</th><th>UoM</th><th>STOCK</th><th>REORDER</th><th>COST</th><th>LOCATION</th><th>STATUS</th></tr></thead>[m
+[32m+[m[32m            <tbody>[m
+[32m+[m[32m    `;[m
+[32m+[m[32m    parsed.forEach((r, idx) => {[m
+[32m+[m[32m        const checked = !r.duplicateOf;[m
+[32m+[m[32m        html += `<tr>[m
+[32m+[m[32m            <td><input type="checkbox" class="bulk-add-checkbox" data-idx="${idx}" ${checked ? 'checked' : ''}></td>[m
+[32m+[m[32m            <td><input type="text" class="bulk-add-code" data-idx="${idx}" value="${r.code.replace(/"/g, '&quot;')}" style="width:110px;"></td>[m
+[32m+[m[32m            <td><input type="text" class="bulk-add-desc" data-idx="${idx}" value="${(r.description || '').replace(/"/g, '&quot;')}" style="width:200px;"></td>[m
+[32m+[m[32m            <td><input type="text" class="bulk-add-uom" data-idx="${idx}" value="${r.uom}" style="width:55px;"></td>[m
+[32m+[m[32m            <td><input type="number" class="bulk-add-stock" data-idx="${idx}" value="${r.stock}" style="width:60px;"></td>[m
+[32m+[m[32m            <td><input type="number" class="bulk-add-reorder" data-idx="${idx}" value="${r.reorder}" style="width:60px;"></td>[m
+[32m+[m[32m            <td><input type="number" step="0.01" class="bulk-add-cost" data-idx="${idx}" value="${r.cost}" style="width:70px;"></td>[m
+[32m+[m[32m            <td><input type="text" class="bulk-add-location" data-idx="${idx}" value="${(r.location || '').replace(/"/g, '&quot;')}" style="width:90px;"></td>[m
+[32m+[m[32m            <td>${r.duplicateOf ? `<span class="badge fuzzy">exists (${r.duplicateOf}${r.duplicateVia === 'description' ? ', via desc' : ''})</span>` : `<span class="badge exact">new</span>`}</td>[m
+[32m+[m[32m        </tr>`;[m
+[32m+[m[32m    });[m
+[32m+[m[32m    html += `</tbody></table></div>`;[m
+[32m+[m[32m    resultsDiv.innerHTML = html;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction selectAllBulkAdd(checked) {[m
+[32m+[m[32m    document.querySelectorAll('.bulk-add-checkbox').forEach(cb => { cb.checked = checked; });[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function applyBulkAdd() {[m
+[32m+[m[32m    const rows = document.querySelectorAll('#bulk-add-results tbody tr');[m
+[32m+[m[32m    const toInsert = [];[m
+[32m+[m[32m    rows.forEach(row => {[m
+[32m+[m[32m        if (!row.querySelector('.bulk-add-checkbox').checked) return;[m
+[32m+[m[32m        const code = row.querySelector('.bulk-add-code').value.trim();[m
+[32m+[m[32m        if (!code) return;[m
+[32m+[m[32m        toInsert.push({[m
+[32m+[m[32m            part_code: code,[m
+[32m+[m[32m            description: row.querySelector('.bulk-add-desc').value.trim() || null,[m
+[32m+[m[32m            uom: row.querySelector('.bulk-add-uom').value.trim() || 'Nos',[m
+[32m+[m[32m            stock_qty: parseInt(row.querySelector('.bulk-add-stock').value, 10) || 0,[m
+[32m+[m[32m            reorder_level: parseInt(row.querySelector('.bulk-add-reorder').value, 10) || 0,[m
+[32m+[m[32m            unit_cost: parseFloat(row.querySelector('.bulk-add-cost').value) || 0,[m
+[32m+[m[32m            location: row.querySelector('.bulk-add-location').value.trim() || null[m
+[32m+[m[32m        });[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    if (toInsert.length === 0) { alert('Select at least one part to add.'); return; }[m
+[32m+[m
+[32m+[m[32m    // Guard against duplicate codes within the uploaded sheet itself[m
+[32m+[m[32m    const seen = new Set();[m
+[32m+[m[32m    const deduped = toInsert.filter(p => {[m
+[32m+[m[32m        const norm = normalizeCode(p.part_code);[m
+[32m+[m[32m        if (seen.has(norm)) return false;[m
+[32m+[m[32m        seen.add(norm);[m
+[32m+[m[32m        return true;[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    if (!confirm(`Add ${deduped.length} new part(s) to inventory?`)) return;[m
+[32m+[m
+[32m+[m[32m    let added = 0, failed = 0;[m
+[32m+[m[32m    for (const payload of deduped) {[m
+[32m+[m[32m        const { error } = await supabaseClient.from('parts').insert(payload);[m
+[32m+[m[32m        if (error) { failed++; console.error(error.message); } else added++;[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    alert(`Added ${added} part(s)` + (failed ? `, ${failed} failed (see browser console — likely a duplicate code already in inventory).` : '.'));[m
+[32m+[m[32m    document.getElementById('bulk-add-results').innerHTML = '';[m
+[32m+[m[32m    document.getElementById('bulk-add-file').value = '';[m
+[32m+[m[32m    toggleBulkAddForm();[m
+[32m+[m[32m    loadInventory();[m
+[32m+[m[32m    loadStats();[m
+[32m+[m[32m}[m
+[32m+[m
+ async function addPart() {[m
+     const partCode = document.getElementById('add-p-code').value.trim();[m
+     if (!partCode) { alert('Part code is required.'); return; }[m
+[1mdiff --git a/index.html b/index.html[m
+[1mindex 0476999..85a8ad7 100644[m
+[1m--- a/index.html[m
+[1m+++ b/index.html[m
+[36m@@ -76,10 +76,27 @@[m
+             </div>[m
+             <div style="display: flex; gap: 10px;">[m
+                 <button class="btn-danger" onclick="bulkDeleteParts()" id="bulk-delete-parts-btn" style="display:none;">Delete Selected (0)</button>[m
+[32m+[m[32m                <button class="btn-secondary" onclick="toggleBulkAddForm()" id="bulk-add-toggle-btn">+ Bulk Add (Excel)</button>[m
+                 <button class="btn-primary" onclick="toggleAddPartForm()" id="add-part-toggle-btn">+ Add Part</button>[m
+             </div>[m
+         </div>[m
+ [m
+[32m+[m[32m        <div class="form-panel" id="bulk-add-excel-form" style="display: none;">[m
+[32m+[m[32m            <h3 style="margin-top:0;">BULK ADD PARTS FROM EXCEL</h3>[m
+[32m+[m[32m            <p style="color: var(--text-muted); font-size: 13px; margin-top: -6px;">[m
+[32m+[m[32m                Upload a spreadsheet of parts to add — works with your Stock List export, or any sheet with[m
+[32m+[m[32m                columns like Code, Description, UoM, Stock Qty, Reorder Level, Unit Cost, Location (a header row[m
+[32m+[m[32m                is auto-detected; missing columns just default to blank/zero). Rows that already exist in[m
+[32m+[m[32m                inventory — matched by code or found embedded in an existing description — are flagged and[m
+[32m+[m[32m                unchecked by default so you don't create duplicates.[m
+[32m+[m[32m            </p>[m
+[32m+[m[32m            <div style="display:flex; gap:10px; align-items:center;">[m
+[32m+[m[32m                <input type="file" id="bulk-add-file" accept=".xlsx, .csv">[m
+[32m+[m[32m                <button class="btn-secondary" onclick="previewBulkAdd()" id="bulk-add-preview-btn">Preview</button>[m
+[32m+[m[32m            </div>[m
+[32m+[m[32m        </div>[m
+[32m+[m[32m        <div id="bulk-add-results" style="margin-bottom: 20px;"></div>[m
+[32m+[m
+         <div class="form-panel" id="add-part-form" style="display: none;">[m
+             <h3 style="margin-top:0;">ADD A PART</h3>[m
+             <div style="display: flex; gap: 15px;">[m
