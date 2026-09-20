@@ -75,6 +75,7 @@
                 <button class="btn-secondary" onclick="openScanner('part-search-input')">📷 Scan Barcode</button>
             </div>
             <div style="display: flex; gap: 10px;">
+                <button class="btn-danger" onclick="deleteAllParts()" id="delete-all-parts-btn" style="border-width: 2px; font-weight: bold;">⚠️ Delete All Parts</button>
                 <button class="btn-danger" onclick="bulkDeleteParts()" id="bulk-delete-parts-btn" style="display:none;">Delete Selected (0)</button>
                 <button class="btn-secondary" onclick="toggleBulkAddForm()" id="bulk-add-toggle-btn">+ Bulk Add (Excel)</button>
                 <button class="btn-primary" onclick="toggleAddPartForm()" id="add-part-toggle-btn">+ Add Part</button>

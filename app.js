@@ -343,6 +343,63 @@ async function bulkDeleteParts() {
     loadStats();
 }
 
+async function deleteAllParts() {
+    const confirmText = prompt(
+        '⚠️ WARNING: You are about to delete EVERY part in the system.\n\n' +
+        'This also removes them from any assemblies they are linked to. Past breakdown records will keep their text, but lose their part links.\n\n' +
+        'To proceed, type exactly: DELETE ALL'
+    );
+    
+    if (confirmText !== 'DELETE ALL') {
+        if (confirmText !== null) alert('Confirmation text did not match. Canceled.');
+        return;
+    }
+
+    showProgress('Deleting All Parts...', 'Fetching all part IDs to delete...');
+    
+    try {
+        const parts = await fetchAllPages(supabaseClient.from('parts').select('id'));
+        
+        if (parts.length === 0) {
+            hideProgress();
+            alert('Inventory is already empty.');
+            return;
+        }
+
+        updateProgress(10, `Found ${parts.length} parts. Deleting in batches...`);
+        
+        const ids = parts.map(p => p.id);
+        const CHUNK_SIZE = 500;
+        let deleted = 0;
+        let failed = 0;
+
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+            const chunk = ids.slice(i, i + CHUNK_SIZE);
+            
+            const { error } = await supabaseClient.from('parts').delete().in('id', chunk);
+            
+            if (error) { 
+                failed += chunk.length; 
+                console.error('Delete chunk error:', error.message); 
+            } else {
+                deleted += chunk.length;
+            }
+            
+            updateProgress(10 + (i / ids.length) * 90, `Deleted ${deleted} parts...`);
+        }
+
+        hideProgress();
+        alert(`Successfully deleted ${deleted} parts.` + (failed > 0 ? ` Failed to delete ${failed} parts.` : ''));
+        
+        loadInventory();
+        loadStats();
+        
+    } catch (error) {
+        hideProgress();
+        alert('Error deleting parts: ' + error.message);
+    }
+}
+
 async function deletePart(partId, partCode) {
     if (!confirm(
         `Delete part "${partCode}"? This also removes it from any assemblies it's linked to. ` +
@@ -1257,7 +1314,6 @@ async function applyStockCheck() {
 
     showProgress('Applying Counts...', `Updating ${updates.length} parts...`);
     
-    // Batch updates concurrently to avoid partial row wiping via upsert
     const { processed, failed } = await processInBatchesAsync(updates, 50, async (u) => {
         return await supabaseClient.from('parts').update({ stock_qty: u.stock_qty }).eq('id', u.id);
     }, (done, total) => {
@@ -1471,7 +1527,6 @@ async function applyStockListChanges() {
 
     let added = 0, updated = 0, failed = 0;
 
-    // Batch inserts
     const CHUNK_SIZE = 500;
     for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
         const chunk = toInsert.slice(i, i + CHUNK_SIZE);
@@ -1480,7 +1535,6 @@ async function applyStockListChanges() {
         updateProgress((i / (toInsert.length + toUpdate.length)) * 100, `Adding new parts...`);
     }
 
-    // Batch async updates 
     const updateStats = await processInBatchesAsync(toUpdate, 50, async (u) => {
         return await supabaseClient.from('parts').update(u.payload).eq('id', u.id);
     }, (done, total) => {
