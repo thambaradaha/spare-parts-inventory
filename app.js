@@ -733,6 +733,25 @@ async function addPart() {
 // ---------------------------------------------------------------------------
 // Breakdowns
 // ---------------------------------------------------------------------------
+async function loadBreakdownSuggestions() {
+    const { data, error } = await supabaseClient.from('breakdowns').select('description, resolution');
+    if (error || !data) return;
+
+    // Deduplicate and filter out empty entries
+    const descriptions = [...new Set(data.map(d => d.description).filter(Boolean))];
+    const resolutions = [...new Set(data.map(d => d.resolution).filter(Boolean))];
+
+    const descList = document.getElementById('bd-desc-list');
+    if (descList) {
+        descList.innerHTML = descriptions.map(d => `<option value="${d.replace(/"/g, '&quot;')}">`).join('');
+    }
+
+    const resList = document.getElementById('bd-res-list');
+    if (resList) {
+        resList.innerHTML = resolutions.map(r => `<option value="${r.replace(/"/g, '&quot;')}">`).join('');
+    }
+}
+
 async function loadBreakdowns() {
     const machineId = document.getElementById('global-machine-select').value;
     let query = supabaseClient.from('breakdowns').select('*, parts(part_code, description), machines(name)');
@@ -754,7 +773,7 @@ async function loadBreakdowns() {
             : `<span class="badge open">Open</span>`;
         const actionCell = isResolved
             ? `<span style="color: var(--text-muted); font-size: 12px;">${b.resolution ? b.resolution : '-'}</span>`
-            : `<button class="btn-secondary" onclick="resolveBreakdown(${b.id})">Resolve</button>`;
+            : `<button class="btn-secondary" onclick="openResolveModal(${b.id})">Resolve</button>`;
         tbody.innerHTML += `<tr>
             <td>${dateStr}</td>
             <td>${b.machines ? b.machines.name : '-'}</td>
@@ -764,14 +783,30 @@ async function loadBreakdowns() {
             <td>${actionCell}</td>
         </tr>`;
     });
+
+    // Populate datalists for autocomplete suggestions
+    loadBreakdownSuggestions();
 }
 
-async function resolveBreakdown(breakdownId) {
-    const resolution = prompt('Resolution notes (optional):', '');
-    if (resolution === null) return;
+function openResolveModal(breakdownId) {
+    document.getElementById('resolve-bd-id').value = breakdownId;
+    document.getElementById('resolve-bd-notes').value = '';
+    document.getElementById('resolve-modal').style.display = 'flex';
+}
+
+function closeResolveModal() {
+    document.getElementById('resolve-modal').style.display = 'none';
+}
+
+async function confirmResolveBreakdown() {
+    const breakdownId = document.getElementById('resolve-bd-id').value;
+    const resolution = document.getElementById('resolve-bd-notes').value.trim();
+    
     await supabaseClient.from('breakdowns')
         .update({ resolved_at: new Date().toISOString(), resolution })
         .eq('id', breakdownId);
+        
+    closeResolveModal();
     loadBreakdowns();
     loadStats();
 }
@@ -782,9 +817,13 @@ async function logBreakdown() {
     const partCode = document.getElementById('bd-part').value.trim();
     const qtyUsed = parseInt(document.getElementById('bd-qty').value, 10) || 0;
     const reportedBy = document.getElementById('bd-reporter').value.trim();
+    const reportedAtInput = document.getElementById('bd-reported-at').value;
 
     if (!machineId) { alert('Please select a machine.'); return; }
     if (!description) { alert('Please describe the breakdown.'); return; }
+
+    // Use selected date, or default to current exact time if left blank
+    const reportedAt = reportedAtInput ? new Date(reportedAtInput).toISOString() : new Date().toISOString();
 
     let partId = null;
     if (partCode) {
@@ -803,7 +842,8 @@ async function logBreakdown() {
         part_id: partId,
         description,
         reported_by: reportedBy || null,
-        qty_used: qtyUsed
+        qty_used: qtyUsed,
+        reported_at: reportedAt
     });
 
     if (partId && qtyUsed) {
@@ -818,11 +858,15 @@ async function logBreakdown() {
     document.getElementById('bd-part').value = '';
     document.getElementById('bd-qty').value = '0';
     document.getElementById('bd-reporter').value = '';
+    document.getElementById('bd-reported-at').value = '';
 
     loadBreakdowns();
     loadStats();
 }
 
+// ---------------------------------------------------------------------------
+// Failure Frequency
+// ---------------------------------------------------------------------------
 async function loadFailureFrequency() {
     const machineId = document.getElementById('global-machine-select').value;
     let query = supabaseClient.from('breakdowns').select('part_id, reported_at, parts(part_code, description), machines(name)');

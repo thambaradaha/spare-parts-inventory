@@ -135,31 +135,38 @@
 
     <!-- Breakdowns Tab -->
     <div id="tab-breakdowns" class="tab-content">
-        <div class="form-panel">
+        <div class="form-panel" style="max-width: 1000px;">
             <h3 style="margin-top:0;">LOG A BREAKDOWN</h3>
-            <div style="display: flex; gap: 15px;">
-                <div class="form-group" style="flex:1;">
-                    <label>MACHINE</label>
+            
+            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                <div class="form-group" style="flex:1; min-width: 150px;">
+                    <label>MACHINE *</label>
                     <select id="bd-machine"></select>
                 </div>
-                <div class="form-group" style="flex:1;">
+                <div class="form-group" style="flex:1.5; min-width: 200px;">
                     <label>PART CODE (OPTIONAL)</label>
                     <div style="display: flex; gap: 5px;">
                         <input type="text" id="bd-part" placeholder="type to search...">
                         <button class="btn-secondary" onclick="openScanner('bd-part')" style="padding: 0 10px;">📷</button>
                     </div>
                 </div>
-                <div class="form-group" style="flex:0.5;">
+                <div class="form-group" style="flex:0.5; min-width: 80px;">
                     <label>QTY USED</label>
                     <input type="number" id="bd-qty" value="0">
                 </div>
-                <div class="form-group" style="flex:1;">
+                <div class="form-group" style="flex:1; min-width: 150px;">
                     <label>REPORTED BY</label>
                     <input type="text" id="bd-reporter">
                 </div>
+                <div class="form-group" style="flex:1; min-width: 180px;">
+                    <label>DATE & TIME (OPTIONAL)</label>
+                    <input type="datetime-local" id="bd-reported-at" title="Leave blank to use current date/time">
+                </div>
             </div>
             <div class="form-group">
-                <input type="text" id="bd-desc" placeholder="Describe the breakdown...">
+                <label>DESCRIPTION *</label>
+                <input type="text" id="bd-desc" list="bd-desc-list" placeholder="Describe the breakdown (type to see suggestions)...">
+                <datalist id="bd-desc-list"></datalist>
             </div>
             <button class="btn-primary" onclick="logBreakdown()">Log breakdown</button>
         </div>
@@ -313,6 +320,23 @@
                     <button class="btn-secondary" onclick="closePartsReviewModal()">Cancel</button>
                     <button class="btn-primary" onclick="confirmAddCandidateParts()">Add Selected to Inventory</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Resolve Breakdown Modal -->
+    <div id="resolve-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
+        <div class="form-panel" style="width: 100%; max-width: 450px; margin: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
+            <h3 style="color: var(--accent); margin-top: 0;">Resolve Breakdown</h3>
+            <input type="hidden" id="resolve-bd-id">
+            <div class="form-group">
+                <label>RESOLUTION NOTES</label>
+                <input type="text" id="resolve-bd-notes" list="bd-res-list" placeholder="How was it fixed? (type to see suggestions)">
+                <datalist id="bd-res-list"></datalist>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn-secondary" onclick="closeResolveModal()">Cancel</button>
+                <button class="btn-primary" onclick="confirmResolveBreakdown()">Mark Resolved</button>
             </div>
         </div>
     </div>
