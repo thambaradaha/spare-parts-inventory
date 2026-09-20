@@ -144,13 +144,14 @@
             <h3 style="margin-top:0;">LOG A BREAKDOWN</h3>
             <div style="display: flex; gap: 15px;">
                 <div class="form-group" style="flex:1;">
-                    <label>MACHINE</label>
+                    <label>MACHINE *</label>
                     <select id="bd-machine"></select>
                 </div>
-                <div class="form-group" style="flex:1;">
+                <div class="form-group" style="flex:1.5;">
                     <label>PART CODE (OPTIONAL)</label>
                     <div style="display: flex; gap: 5px;">
-                        <input type="text" id="bd-part" placeholder="type to search...">
+                        <input type="text" id="bd-part" list="bd-part-list" placeholder="type to search..." oninput="updatePartSuggestions(this.value, 'bd-part-list')">
+                        <datalist id="bd-part-list"></datalist>
                         <button class="btn-secondary" onclick="openScanner('bd-part')" style="padding: 0 10px;">📷</button>
                     </div>
                 </div>
@@ -164,16 +165,18 @@
                 </div>
                 <div class="form-group" style="flex:1;">
                     <label>DATE REPORTED</label>
-                    <input type="date" id="bd-date">
+                    <input type="datetime-local" id="bd-reported-at" title="Leave blank to use current date/time">
                 </div>
             </div>
             <div class="form-group">
-                <input type="text" id="bd-desc" placeholder="Describe the breakdown...">
+                <label>DESCRIPTION *</label>
+                <input type="text" id="bd-desc" list="bd-desc-list" placeholder="Describe the breakdown (type to see suggestions)...">
+                <datalist id="bd-desc-list"></datalist>
             </div>
             <button class="btn-primary" onclick="logBreakdown()">Log breakdown</button>
         </div>
         <table>
-            <thead><tr><th>REPORTED</th><th>MACHINE</th><th>PART</th><th>DESCRIPTION</th><th>STATUS</th><th>ACTION</th></tr></thead>
+            <thead><tr><th>REPORTED</th><th>MACHINE</th><th>PART</th><th>DESCRIPTION</th><th>STATUS</th><th>RESOLUTION</th><th>ACTIONS</th></tr></thead>
             <tbody id="breakdowns-tbody"></tbody>
         </table>
     </div>
@@ -296,8 +299,6 @@
         </div>
     </div>
 
-    <!-- Parts Review Modal (from PDF scan) -->
-    <!-- Global Progress Overlay — shown during any bulk/long-running operation -->
     <!-- Edit Breakdown Modal -->
     <div id="edit-breakdown-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9998; justify-content: center; align-items: center;">
         <div style="background: var(--panel-bg); padding: 25px 30px; border-radius: 8px; width: 90%; max-width: 550px;">
@@ -309,13 +310,14 @@
                 </div>
                 <div class="form-group" style="flex:1;">
                     <label>DATE REPORTED</label>
-                    <input type="date" id="edit-bd-date">
+                    <input type="datetime-local" id="edit-bd-date">
                 </div>
             </div>
             <div style="display: flex; gap: 15px;">
                 <div class="form-group" style="flex:1;">
                     <label>PART CODE (OPTIONAL)</label>
-                    <input type="text" id="edit-bd-part" placeholder="type to search...">
+                    <input type="text" id="edit-bd-part" list="edit-bd-part-list" placeholder="type to search..." oninput="updatePartSuggestions(this.value, 'edit-bd-part-list')">
+                    <datalist id="edit-bd-part-list"></datalist>
                 </div>
                 <div class="form-group" style="flex:0.6;">
                     <label>QTY USED</label>
@@ -344,6 +346,23 @@
             <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:10px;">
                 <button class="btn-secondary" onclick="closeEditBreakdownModal()">Cancel</button>
                 <button class="btn-primary" onclick="saveBreakdownEdit()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Resolve Breakdown Modal -->
+    <div id="resolve-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
+        <div class="form-panel" style="width: 100%; max-width: 450px; margin: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
+            <h3 style="color: var(--accent); margin-top: 0;">Resolve Breakdown</h3>
+            <input type="hidden" id="resolve-bd-id">
+            <div class="form-group">
+                <label>RESOLUTION NOTES</label>
+                <input type="text" id="resolve-bd-notes" list="bd-res-list" placeholder="How was it fixed? (type to see suggestions)">
+                <datalist id="bd-res-list"></datalist>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn-secondary" onclick="closeResolveModal()">Cancel</button>
+                <button class="btn-primary" onclick="confirmResolveBreakdown()">Mark Resolved</button>
             </div>
         </div>
     </div>
