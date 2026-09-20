@@ -75,7 +75,6 @@
                 <button class="btn-secondary" onclick="openScanner('part-search-input')">📷 Scan Barcode</button>
             </div>
             <div style="display: flex; gap: 10px;">
-                <button class="btn-danger" onclick="deleteAllParts()" id="delete-all-parts-btn" style="border-width: 2px; font-weight: bold;">⚠️ Delete All Parts</button>
                 <button class="btn-danger" onclick="bulkDeleteParts()" id="bulk-delete-parts-btn" style="display:none;">Delete Selected (0)</button>
                 <button class="btn-secondary" onclick="toggleBulkAddForm()" id="bulk-add-toggle-btn">+ Bulk Add (Excel)</button>
                 <button class="btn-primary" onclick="toggleAddPartForm()" id="add-part-toggle-btn">+ Add Part</button>
@@ -118,8 +117,14 @@
             <thead><tr><th><input type="checkbox" id="parts-select-all" onchange="toggleSelectAllParts(this.checked)"></th><th>CODE</th><th>DESCRIPTION</th><th>UoM</th><th>STOCK</th><th>REORDER LVL</th><th>COST</th><th>QR</th><th>ACTION</th></tr></thead>
             <tbody id="parts-tbody"></tbody>
         </table>
-        
-        <div id="inventory-pagination-container"></div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:15px; flex-wrap:wrap; gap:10px;">
+            <span id="parts-count-label" style="color: var(--text-muted); font-size: 13px;"></span>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <button class="btn-secondary" onclick="changeInventoryPage(-1)" id="parts-prev-btn">← Prev</button>
+                <span id="parts-page-label" style="color: var(--text-muted); font-size: 13px;"></span>
+                <button class="btn-secondary" onclick="changeInventoryPage(1)" id="parts-next-btn">Next →</button>
+            </div>
+        </div>
     </div>
 
     <!-- Low Stock Tab -->
@@ -135,38 +140,35 @@
 
     <!-- Breakdowns Tab -->
     <div id="tab-breakdowns" class="tab-content">
-        <div class="form-panel" style="max-width: 1000px;">
+        <div class="form-panel">
             <h3 style="margin-top:0;">LOG A BREAKDOWN</h3>
-            
-            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-                <div class="form-group" style="flex:1; min-width: 150px;">
-                    <label>MACHINE *</label>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;">
+                    <label>MACHINE</label>
                     <select id="bd-machine"></select>
                 </div>
-                <div class="form-group" style="flex:1.5; min-width: 200px;">
+                <div class="form-group" style="flex:1;">
                     <label>PART CODE (OPTIONAL)</label>
                     <div style="display: flex; gap: 5px;">
                         <input type="text" id="bd-part" placeholder="type to search...">
                         <button class="btn-secondary" onclick="openScanner('bd-part')" style="padding: 0 10px;">📷</button>
                     </div>
                 </div>
-                <div class="form-group" style="flex:0.5; min-width: 80px;">
+                <div class="form-group" style="flex:0.5;">
                     <label>QTY USED</label>
                     <input type="number" id="bd-qty" value="0">
                 </div>
-                <div class="form-group" style="flex:1; min-width: 150px;">
+                <div class="form-group" style="flex:1;">
                     <label>REPORTED BY</label>
                     <input type="text" id="bd-reporter">
                 </div>
-                <div class="form-group" style="flex:1; min-width: 180px;">
-                    <label>DATE & TIME (OPTIONAL)</label>
-                    <input type="datetime-local" id="bd-reported-at" title="Leave blank to use current date/time">
+                <div class="form-group" style="flex:1;">
+                    <label>DATE REPORTED</label>
+                    <input type="date" id="bd-date">
                 </div>
             </div>
             <div class="form-group">
-                <label>DESCRIPTION *</label>
-                <input type="text" id="bd-desc" list="bd-desc-list" placeholder="Describe the breakdown (type to see suggestions)...">
-                <datalist id="bd-desc-list"></datalist>
+                <input type="text" id="bd-desc" placeholder="Describe the breakdown...">
             </div>
             <button class="btn-primary" onclick="logBreakdown()">Log breakdown</button>
         </div>
@@ -295,6 +297,67 @@
     </div>
 
     <!-- Parts Review Modal (from PDF scan) -->
+    <!-- Global Progress Overlay — shown during any bulk/long-running operation -->
+    <!-- Edit Breakdown Modal -->
+    <div id="edit-breakdown-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9998; justify-content: center; align-items: center;">
+        <div style="background: var(--panel-bg); padding: 25px 30px; border-radius: 8px; width: 90%; max-width: 550px;">
+            <h3 style="color: var(--accent); margin-top: 0;">Edit Breakdown</h3>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;">
+                    <label>MACHINE</label>
+                    <select id="edit-bd-machine"></select>
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label>DATE REPORTED</label>
+                    <input type="date" id="edit-bd-date">
+                </div>
+            </div>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex:1;">
+                    <label>PART CODE (OPTIONAL)</label>
+                    <input type="text" id="edit-bd-part" placeholder="type to search...">
+                </div>
+                <div class="form-group" style="flex:0.6;">
+                    <label>QTY USED</label>
+                    <input type="number" id="edit-bd-qty" value="0">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>REPORTED BY</label>
+                <input type="text" id="edit-bd-reporter">
+            </div>
+            <div class="form-group">
+                <label>DESCRIPTION</label>
+                <input type="text" id="edit-bd-desc">
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="edit-bd-resolved" onchange="toggleEditResolutionField()" style="width:auto; margin-right:6px;">Resolved</label>
+            </div>
+            <div class="form-group" id="edit-bd-resolution-wrap" style="display:none;">
+                <label>RESOLUTION NOTES</label>
+                <input type="text" id="edit-bd-resolution">
+            </div>
+            <p style="color: var(--text-muted); font-size: 12px;">
+                Changing the part or quantity used automatically adjusts stock to reflect the correction
+                (the old quantity is returned, the new one is deducted).
+            </p>
+            <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:10px;">
+                <button class="btn-secondary" onclick="closeEditBreakdownModal()">Cancel</button>
+                <button class="btn-primary" onclick="saveBreakdownEdit()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="global-progress-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 10000; justify-content: center; align-items: center;">
+        <div style="background: var(--panel-bg); padding: 25px 30px; border-radius: 8px; width: 90%; max-width: 480px; text-align: center;">
+            <h3 id="global-progress-title" style="color: var(--accent); margin-top: 0;">Working...</h3>
+            <div class="progress-bar-track">
+                <div class="progress-bar-fill" id="global-progress-fill" style="width:0%;"></div>
+            </div>
+            <p id="global-progress-text" style="color: var(--text-muted); font-size: 13px; margin-bottom: 0;">Starting...</p>
+        </div>
+    </div>
+
     <div id="parts-review-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
         <div style="background: var(--panel-bg); padding: 20px; border-radius: 8px; width: 95%; max-width: 1150px; max-height: 85vh; overflow-y: auto;">
             <h3 style="color: var(--accent); margin-top: 0;">Scan Results — Candidate Spare Parts</h3>
@@ -320,34 +383,6 @@
                     <button class="btn-secondary" onclick="closePartsReviewModal()">Cancel</button>
                     <button class="btn-primary" onclick="confirmAddCandidateParts()">Add Selected to Inventory</button>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Resolve Breakdown Modal -->
-    <div id="resolve-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
-        <div class="form-panel" style="width: 100%; max-width: 450px; margin: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
-            <h3 style="color: var(--accent); margin-top: 0;">Resolve Breakdown</h3>
-            <input type="hidden" id="resolve-bd-id">
-            <div class="form-group">
-                <label>RESOLUTION NOTES</label>
-                <input type="text" id="resolve-bd-notes" list="bd-res-list" placeholder="How was it fixed? (type to see suggestions)">
-                <datalist id="bd-res-list"></datalist>
-            </div>
-            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
-                <button class="btn-secondary" onclick="closeResolveModal()">Cancel</button>
-                <button class="btn-primary" onclick="confirmResolveBreakdown()">Mark Resolved</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Global Progress Overlay -->
-    <div id="global-progress-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 10000; justify-content: center; align-items: center; flex-direction: column;">
-        <div style="background: var(--panel-bg); padding: 30px; border-radius: 8px; width: 80%; max-width: 400px; text-align: center; border: 1px solid var(--border);">
-            <h3 id="global-progress-title" style="color: var(--accent); margin-top: 0;">Processing...</h3>
-            <p id="global-progress-text" style="color: var(--text-muted); font-size: 14px; margin-bottom: 20px;">Please wait</p>
-            <div class="progress-bar-track">
-                <div class="progress-bar-fill" id="global-progress-fill" style="width: 0%;"></div>
             </div>
         </div>
     </div>
