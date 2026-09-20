@@ -181,8 +181,7 @@ async function loadStats() {
 // Machines dropdown (shared across tabs)
 // ---------------------------------------------------------------------------
 async function loadMachinesDropdown() {
-    const { data, error } = await supabaseClient.from('machines').select('*').order('name');
-    const machines = error ? [] : data;
+    const machines = await fetchAllRows(() => supabaseClient.from('machines').select('*').order('name'));
 
     const selects = [
         document.getElementById('global-machine-select'),
@@ -670,8 +669,8 @@ async function updatePartSuggestions(query, listId) {
         if (data) {
             const datalist = document.getElementById(listId);
             if (datalist) {
-                datalist.innerHTML = data.map(p => 
-                    `<option value="${p.part_code}">${p.description || ''}</option>`
+                datalist.innerHTML = data.map(p =>
+                    `<option value="${p.part_code.replace(/"/g, '&quot;')}">${p.description || ''}</option>`
                 ).join('');
             }
         }
@@ -679,8 +678,8 @@ async function updatePartSuggestions(query, listId) {
 }
 
 async function loadBreakdownSuggestions() {
-    const { data, error } = await supabaseClient.from('breakdowns').select('description, resolution');
-    if (error || !data) return;
+    const data = await fetchAllRows(() => supabaseClient.from('breakdowns').select('description, resolution'));
+    if (!data.length) return;
 
     const descriptions = [...new Set(data.map(d => d.description).filter(Boolean))];
     const resolutions = [...new Set(data.map(d => d.resolution).filter(Boolean))];
@@ -694,13 +693,15 @@ async function loadBreakdownSuggestions() {
 
 async function loadBreakdowns() {
     const machineId = document.getElementById('global-machine-select').value;
-    let query = supabaseClient.from('breakdowns').select('*, parts(part_code, description), machines(name)');
-    if (machineId && machineId !== 'all' && machineId !== '0') query = query.eq('machine_id', machineId);
-    const { data, error } = await query.order('reported_at', { ascending: false });
+    const data = await fetchAllRows(() => {
+        let query = supabaseClient.from('breakdowns').select('*, parts(part_code, description), machines(name)');
+        if (machineId && machineId !== 'all' && machineId !== '0') query = query.eq('machine_id', machineId);
+        return query.order('reported_at', { ascending: false });
+    });
 
     const tbody = document.getElementById('breakdowns-tbody');
     tbody.innerHTML = '';
-    if (error || !data || data.length === 0) {
+    if (data.length === 0) {
         tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No breakdowns logged yet.</td></tr>`;
         return;
     }
@@ -920,14 +921,16 @@ async function logBreakdown() {
 
 async function loadFailureFrequency() {
     const machineId = document.getElementById('global-machine-select').value;
-    let query = supabaseClient.from('breakdowns').select('part_id, reported_at, parts(part_code, description), machines(name)');
-    if (machineId && machineId !== 'all' && machineId !== '0') query = query.eq('machine_id', machineId);
-    const { data, error } = await query;
+    const data = await fetchAllRows(() => {
+        let query = supabaseClient.from('breakdowns').select('part_id, reported_at, parts(part_code, description), machines(name)');
+        if (machineId && machineId !== 'all' && machineId !== '0') query = query.eq('machine_id', machineId);
+        return query;
+    });
 
     const tbody = document.getElementById('failure-tbody');
     tbody.innerHTML = '';
 
-    if (error || !data || data.length === 0) {
+    if (data.length === 0) {
         tbody.innerHTML = `<tr class="empty-row"><td colspan="5">No breakdown history yet.</td></tr>`;
         if (paretoChartInstance) paretoChartInstance.destroy();
         return;
@@ -1004,10 +1007,10 @@ function renderParetoChart(labels, counts, percentages) {
 // Machines
 // ---------------------------------------------------------------------------
 async function loadMachinesTable() {
-    const { data, error } = await supabaseClient.from('machines').select('*').order('name');
+    const data = await fetchAllRows(() => supabaseClient.from('machines').select('*').order('name'));
     const tbody = document.getElementById('machines-tbody');
     tbody.innerHTML = '';
-    if (error || !data || data.length === 0) {
+    if (data.length === 0) {
         tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No machines added yet.</td></tr>`;
         return;
     }
