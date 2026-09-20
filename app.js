@@ -7,6 +7,9 @@ let currentTab = 'parts';
 let paretoChartInstance = null;
 let html5QrcodeScanner = null;
 let lastStockCheckResults = [];
+let currentInventoryData = [];
+let inventoryCurrentPage = 1;
+const INVENTORY_PAGE_SIZE = 100;
 
 document.addEventListener('DOMContentLoaded', () => {
     loadMachinesDropdown();
@@ -36,8 +39,52 @@ async function loadAllData() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Mirrors the old backend's "which parts belong to this machine's assemblies" scoping.
-// Returns null for "all machines", otherwise a (possibly empty) array of part ids.
+// --- Core Progress UI ---
+function showProgress(title, text) {
+    document.getElementById('global-progress-title').innerText = title;
+    document.getElementById('global-progress-text').innerText = text;
+    document.getElementById('global-progress-fill').style.width = '0%';
+    document.getElementById('global-progress-overlay').style.display = 'flex';
+}
+
+function updateProgress(percent, text) {
+    if (text) document.getElementById('global-progress-text').innerText = text;
+    document.getElementById('global-progress-fill').style.width = Math.min(100, Math.max(0, percent)) + '%';
+}
+
+function hideProgress() {
+    document.getElementById('global-progress-overlay').style.display = 'none';
+}
+
+// --- Core Pagination Helper ---
+async function fetchAllPages(query, pageSize = 1000) {
+    let allData = [];
+    let page = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+        const { data, error } = await query.range(page * pageSize, (page + 1) * pageSize - 1);
+        if (error) throw error;
+        allData.push(...data);
+        if (data.length < pageSize) hasMore = false;
+        else page++;
+    }
+    return allData;
+}
+
+async function processInBatchesAsync(items, batchSize, processFn, onProgress) {
+    let processed = 0;
+    let failed = 0;
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize);
+        const results = await Promise.all(batch.map(processFn));
+        failed += results.filter(r => r && r.error).length;
+        processed += batch.length;
+        if (onProgress) onProgress(processed, items.length);
+    }
+    return { processed, failed };
+}
+
 async function scopedPartIds(machineId) {
     if (!machineId || machineId === 'all' || machineId === '0') return null;
 
@@ -60,16 +107,13 @@ async function fetchScopedParts(machineId, selectCols = '*') {
         if (partIds.length === 0) return [];
         query = query.in('id', partIds);
     }
-    const { data, error } = await query;
-    if (error) { console.error(error); return []; }
-    return data;
+    return await fetchAllPages(query);
 }
 
 function normalizeCode(code) {
     return code.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-// LCS-based similarity, approximating Python's difflib.SequenceMatcher.ratio()
 function similarityRatio(a, b) {
     const m = a.length, n = b.length;
     if (m === 0 || n === 0) return 0;
@@ -82,11 +126,6 @@ function similarityRatio(a, b) {
     return (2 * dp[m][n]) / (m + n);
 }
 
-// Matches your real-world convention: manufacturer part numbers from manuals
-// often live inside the Description text, not as the Item No./internal code
-// itself. Checks whether `code` (normalized) appears as a substring inside any
-// part's normalized description. Requires 5+ alphanumeric chars to avoid false
-// hits from short codes matching by coincidence.
 function findMatchInDescriptions(code, parts) {
     const normCode = normalizeCode(code);
     if (normCode.length < 5) return null;
@@ -113,8 +152,6 @@ function normalizeText(text) {
     return (text || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Matches an input description against existing parts' descriptions, so a
-// misspelled or reformatted part code can still be caught by name similarity.
 function getCloseDescriptionMatches(targetDescription, parts, n = 3, cutoff = 0.5) {
     const normTarget = normalizeText(targetDescription);
     if (!normTarget) return [];
@@ -135,18 +172,16 @@ async function loadStats() {
     const totalParts = parts.length;
     const lowStock = parts.filter(p => (p.stock_qty || 0) <= (p.reorder_level || 0)).length;
 
-    const { data: machines } = await supabaseClient.from('machines').select('id');
-    const totalMachines = machines ? machines.length : 0;
+    const { count: totalMachines } = await supabaseClient.from('machines').select('id', { count: 'exact', head: true });
 
-    let bdQuery = supabaseClient.from('breakdowns').select('id').is('resolved_at', null);
+    let bdQuery = supabaseClient.from('breakdowns').select('id', { count: 'exact', head: true }).is('resolved_at', null);
     if (machineId && machineId !== 'all' && machineId !== '0') bdQuery = bdQuery.eq('machine_id', machineId);
-    const { data: openBd } = await bdQuery;
-    const openBreakdowns = openBd ? openBd.length : 0;
+    const { count: openBreakdowns } = await bdQuery;
 
     document.getElementById('stat-total').innerText = totalParts;
     document.getElementById('stat-low').innerText = lowStock;
-    document.getElementById('stat-machines').innerText = totalMachines;
-    document.getElementById('stat-breakdowns').innerText = openBreakdowns;
+    document.getElementById('stat-machines').innerText = totalMachines || 0;
+    document.getElementById('stat-breakdowns').innerText = openBreakdowns || 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,16 +219,23 @@ async function loadInventory() {
 
     let query = supabaseClient.from('parts').select('*');
     if (partIds !== null) {
-        if (partIds.length === 0) { renderParts([]); return; }
+        if (partIds.length === 0) { renderPartsPage([], 1); return; }
         query = query.in('id', partIds);
     }
     if (q) query = query.or(`part_code.ilike.%${q}%,description.ilike.%${q}%`);
 
-    const { data, error } = await query.order('part_code');
-    renderParts(error ? [] : data);
+    try {
+        const data = await fetchAllPages(query.order('part_code'));
+        currentInventoryData = data;
+        inventoryCurrentPage = 1;
+        renderPartsPage(currentInventoryData, inventoryCurrentPage);
+    } catch (err) {
+        console.error(err);
+        renderPartsPage([], 1);
+    }
 }
 
-function renderParts(data) {
+function renderPartsPage(data, page) {
     const tbody = document.getElementById('parts-tbody');
     tbody.innerHTML = '';
     document.getElementById('parts-select-all').checked = false;
@@ -202,9 +244,15 @@ function renderParts(data) {
 
     if (data.length === 0) {
         tbody.innerHTML = `<tr class="empty-row"><td colspan="9">No parts found.</td></tr>`;
+        updatePaginationUI(0, page);
         return;
     }
-    data.forEach(p => {
+
+    const startIndex = (page - 1) * INVENTORY_PAGE_SIZE;
+    const endIndex = Math.min(startIndex + INVENTORY_PAGE_SIZE, data.length);
+    const pageData = data.slice(startIndex, endIndex);
+
+    pageData.forEach(p => {
         tbody.innerHTML += `<tr>
             <td><input type="checkbox" class="part-checkbox" data-id="${p.id}" data-code="${p.part_code.replace(/"/g, '&quot;')}" onchange="updateBulkDeleteButton()"></td>
             <td>${p.part_code}</td><td>${p.description || '-'}</td><td>${p.uom || 'Nos'}</td>
@@ -213,6 +261,39 @@ function renderParts(data) {
             <td><button class="btn-danger" onclick="deletePart(${p.id}, '${p.part_code.replace(/'/g, "\\'")}')">Delete</button></td>
         </tr>`;
     });
+    
+    updatePaginationUI(data.length, page);
+}
+
+function updatePaginationUI(totalItems, currentPage) {
+    let container = document.getElementById('inventory-pagination');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'inventory-pagination';
+        container.style.display = 'flex';
+        container.style.justifyContent = 'flex-end';
+        container.style.gap = '10px';
+        container.style.marginTop = '15px';
+        document.getElementById('inventory-pagination-container').appendChild(container);
+    }
+    
+    const totalPages = Math.ceil(totalItems / INVENTORY_PAGE_SIZE) || 1;
+    container.innerHTML = `
+        <span style="align-self: center; font-size: 13px; color: var(--text-muted);">
+            Showing ${(currentPage - 1) * INVENTORY_PAGE_SIZE + (totalItems ? 1 : 0)} - ${Math.min(currentPage * INVENTORY_PAGE_SIZE, totalItems)} of ${totalItems}
+        </span>
+        <button class="btn-secondary" ${currentPage === 1 ? 'disabled' : ''} onclick="changeInventoryPage(${currentPage - 1})">Previous</button>
+        <span style="align-self: center; font-size: 13px;">Page ${currentPage} of ${totalPages}</span>
+        <button class="btn-secondary" ${currentPage === totalPages ? 'disabled' : ''} onclick="changeInventoryPage(${currentPage + 1})">Next</button>
+    `;
+}
+
+function changeInventoryPage(newPage) {
+    const totalPages = Math.ceil(currentInventoryData.length / INVENTORY_PAGE_SIZE);
+    if (newPage >= 1 && newPage <= totalPages) {
+        inventoryCurrentPage = newPage;
+        renderPartsPage(currentInventoryData, inventoryCurrentPage);
+    }
 }
 
 function toggleSelectAllParts(checked) {
@@ -339,7 +420,6 @@ async function exportRequisition() {
     XLSX.writeFile(wb, filename);
 }
 
-// --- Add Part ---
 function toggleAddPartForm() {
     const form = document.getElementById('add-part-form');
     const isHidden = form.style.display === 'none';
@@ -347,10 +427,6 @@ function toggleAddPartForm() {
     document.getElementById('add-part-toggle-btn').innerText = isHidden ? 'Cancel' : '+ Add Part';
 }
 
-// ---------------------------------------------------------------------------
-// Bulk Add Parts from Excel — adds new parts only. For updating existing
-// inventory in bulk, use the Full Stock List round-trip on the Stock Check tab.
-// ---------------------------------------------------------------------------
 let lastBulkAddRows = [];
 
 function toggleBulkAddForm() {
@@ -399,10 +475,6 @@ async function previewBulkAdd() {
         return;
     }
 
-    // Auto-detect a header row within the first few rows; fall back to a fixed
-    // column order (Code, Description, UoM, Stock, Reorder, Cost, Location) if
-    // nothing recognizable is found — covers both this app's own export and
-    // arbitrary company sheets like the "Item No. / Description / UoM / Qty" format.
     let headerRowIdx = -1;
     let colIdx = { code: 0, description: 1, uom: 2, stock: 3, reorder: 4, cost: 5, location: 6 };
     for (let i = 0; i < Math.min(rows.length, 5); i++) {
@@ -424,7 +496,21 @@ async function previewBulkAdd() {
     }
     const dataRows = headerRowIdx >= 0 ? rows.slice(headerRowIdx + 1) : rows;
 
-    const { data: existingParts } = await supabaseClient.from('parts').select('id, part_code, description');
+    showProgress('Analyzing File...', 'Loading inventory to check for duplicates...');
+    
+    let existingParts;
+    try {
+        existingParts = await fetchAllPages(supabaseClient.from('parts').select('id, part_code, description'));
+    } catch(err) {
+        resultsDiv.innerHTML = `<p style="color: var(--danger);">Error checking inventory: ${err.message}</p>`;
+        hideProgress();
+        btn.disabled = false;
+        btn.innerText = 'Preview';
+        return;
+    }
+    
+    updateProgress(50, `Checking for duplicates...`);
+
     const byNorm = {};
     (existingParts || []).forEach(p => { byNorm[normalizeCode(p.part_code)] = p; });
 
@@ -456,6 +542,7 @@ async function previewBulkAdd() {
     lastBulkAddRows = parsed;
     btn.disabled = false;
     btn.innerText = 'Preview';
+    hideProgress();
 
     if (parsed.length === 0) {
         resultsDiv.innerHTML = '<p style="color: var(--text-muted);">No rows with a code found in this file.</p>';
@@ -519,7 +606,6 @@ async function applyBulkAdd() {
 
     if (toInsert.length === 0) { alert('Select at least one part to add.'); return; }
 
-    // Guard against duplicate codes within the uploaded sheet itself
     const seen = new Set();
     const deduped = toInsert.filter(p => {
         const norm = normalizeCode(p.part_code);
@@ -530,13 +616,20 @@ async function applyBulkAdd() {
 
     if (!confirm(`Add ${deduped.length} new part(s) to inventory?`)) return;
 
+    showProgress('Adding Parts...', `Writing ${deduped.length} parts...`);
+    const CHUNK_SIZE = 500;
     let added = 0, failed = 0;
-    for (const payload of deduped) {
-        const { error } = await supabaseClient.from('parts').insert(payload);
-        if (error) { failed++; console.error(error.message); } else added++;
+
+    for (let i = 0; i < deduped.length; i += CHUNK_SIZE) {
+        const chunk = deduped.slice(i, i + CHUNK_SIZE);
+        const { error } = await supabaseClient.from('parts').insert(chunk);
+        if (error) { failed += chunk.length; console.error(error.message); } else added += chunk.length;
+        updateProgress((i / deduped.length) * 100, `Adding parts ${i} to ${i + chunk.length}...`);
     }
 
+    hideProgress();
     alert(`Added ${added} part(s)` + (failed ? `, ${failed} failed (see browser console — likely a duplicate code already in inventory).` : '.'));
+    
     document.getElementById('bulk-add-results').innerHTML = '';
     document.getElementById('bulk-add-file').value = '';
     toggleBulkAddForm();
@@ -815,7 +908,7 @@ async function addMachine() {
 }
 
 // ---------------------------------------------------------------------------
-// Manuals (Supabase Storage)
+// Manuals
 // ---------------------------------------------------------------------------
 async function loadManuals() {
     const machineId = document.getElementById('global-machine-select').value;
@@ -850,8 +943,6 @@ async function deleteManual(manualId, storagePath, filename) {
 
     const { error: storageError } = await supabaseClient.storage.from('manuals').remove([storagePath]);
     if (storageError) {
-        // Continue anyway — the file may already be gone or the path may be stale;
-        // we still want to let the person clean up the orphaned database row.
         console.error('Storage delete error:', storageError.message);
     }
 
@@ -861,9 +952,6 @@ async function deleteManual(manualId, storagePath, filename) {
     loadManuals();
 }
 
-// Supabase-js's storage.upload() doesn't expose progress events, so for the
-// progress bar we bypass it and talk to the Storage REST endpoint directly
-// via XMLHttpRequest, which does support upload progress.
 function uploadFileWithProgress(bucket, path, file, onProgress) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -885,7 +973,7 @@ function uploadFileWithProgress(bucket, path, file, onProgress) {
                 resolve();
             } else {
                 let message = xhr.responseText;
-                try { message = JSON.parse(xhr.responseText).message || message; } catch (e) { /* not JSON */ }
+                try { message = JSON.parse(xhr.responseText).message || message; } catch (e) { }
                 reject(new Error(message || `Upload failed with status ${xhr.status}`));
             }
         };
@@ -905,15 +993,10 @@ async function uploadManual() {
     const file = fileInput.files[0];
     if (!file.name.toLowerCase().endsWith('.pdf')) { alert('Only PDF files are supported.'); return; }
 
-    const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — Supabase's free-tier default file size limit
+    const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; 
     if (file.size > MAX_UPLOAD_BYTES) {
         const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-        alert(
-            `"${file.name}" is ${sizeMb} MB, which is over the 50 MB limit.\n\n` +
-            `This is Supabase's default per-file limit on the free tier. If you've raised your ` +
-            `project's Global file size limit (Storage -> Settings) or upgraded to Pro, you can ` +
-            `increase MAX_UPLOAD_BYTES near the top of uploadManual() in app.js to match.`
-        );
+        alert(`"${file.name}" is ${sizeMb} MB, which is over the 50 MB limit.`);
         return;
     }
 
@@ -995,10 +1078,7 @@ function rowsToEntries(rows) {
             if (/^-?\d+(\.\d+)?$/.test(cNorm)) { qty = parseFloat(cNorm); qtyIndex = i; break; }
         }
 
-        // Any remaining non-code, non-quantity cell is treated as a description/name,
-        // so sheets laid out as [Code, Description, Qty] are picked up naturally.
         const description = cells.slice(1).filter((_, i) => i + 1 !== qtyIndex).join(' ').trim();
-
         entries.push({ raw_code: code, description: description || null, qty });
     });
     return entries;
@@ -1037,13 +1117,20 @@ async function uploadStockCheck() {
 
     const entries = rowsToEntries(rows);
 
-    const { data: allParts, error } = await supabaseClient.from('parts').select('id, part_code, description, stock_qty');
-    if (error) {
+    showProgress('Analyzing Count...', 'Fetching current inventory...');
+    
+    let allParts;
+    try {
+        allParts = await fetchAllPages(supabaseClient.from('parts').select('id, part_code, description, stock_qty'));
+    } catch (error) {
         resultsDiv.innerHTML = `<p style="color: var(--danger);">Error loading parts: ${error.message}</p>`;
         analyzeBtn.disabled = false;
         analyzeBtn.innerText = 'Analyze File';
+        hideProgress();
         return;
     }
+
+    updateProgress(50, `Comparing ${entries.length} items...`);
 
     const byNormCode = {};
     allParts.forEach(p => { byNormCode[normalizeCode(p.part_code)] = p; });
@@ -1051,43 +1138,28 @@ async function uploadStockCheck() {
 
     const results = [];
     let matched = 0;
+    
     entries.forEach(entry => {
         const norm = normalizeCode(entry.raw_code);
         const exact = byNormCode[norm];
         if (exact) {
             matched++;
             results.push({
-                input_code: entry.raw_code,
-                input_description: entry.description,
-                input_qty: entry.qty,
-                match_type: 'exact',
-                part_id: exact.id,
-                part_code: exact.part_code,
-                description: exact.description,
-                system_qty: exact.stock_qty,
-                delta: entry.qty === null ? null : entry.qty - exact.stock_qty,
-                suggestions: []
+                input_code: entry.raw_code, input_description: entry.description, input_qty: entry.qty,
+                match_type: 'exact', part_id: exact.id, part_code: exact.part_code, description: exact.description,
+                system_qty: exact.stock_qty, delta: entry.qty === null ? null : entry.qty - exact.stock_qty, suggestions: []
             });
             return;
         }
 
-        // Your real-world convention: the manufacturer code often isn't the Item
-        // No. itself, but is embedded inside an existing part's Description.
         const embeddedMatch = findMatchInDescriptions(entry.raw_code, allParts);
         if (embeddedMatch) {
             matched++;
             results.push({
-                input_code: entry.raw_code,
-                input_description: entry.description,
-                input_qty: entry.qty,
-                match_type: 'exact',
-                matched_via: 'description',
-                part_id: embeddedMatch.id,
-                part_code: embeddedMatch.part_code,
-                description: embeddedMatch.description,
-                system_qty: embeddedMatch.stock_qty,
-                delta: entry.qty === null ? null : entry.qty - embeddedMatch.stock_qty,
-                suggestions: []
+                input_code: entry.raw_code, input_description: entry.description, input_qty: entry.qty,
+                match_type: 'exact', matched_via: 'description', part_id: embeddedMatch.id,
+                part_code: embeddedMatch.part_code, description: embeddedMatch.description,
+                system_qty: embeddedMatch.stock_qty, delta: entry.qty === null ? null : entry.qty - embeddedMatch.stock_qty, suggestions: []
             });
             return;
         }
@@ -1107,7 +1179,6 @@ async function uploadStockCheck() {
               }))
             : [];
 
-        // Merge both sources, keeping the best score per part, capped at 3 suggestions.
         const merged = {};
         [...codeMatches, ...descMatches].forEach(s => {
             if (!merged[s.part_id] || merged[s.part_id].similarity < s.similarity) merged[s.part_id] = s;
@@ -1117,8 +1188,7 @@ async function uploadStockCheck() {
         results.push({
             input_code: entry.raw_code, input_description: entry.description, input_qty: entry.qty,
             match_type: suggestions.length ? 'fuzzy' : 'unmatched',
-            part_id: null, part_code: null, description: null, system_qty: null, delta: null,
-            suggestions
+            part_id: null, part_code: null, description: null, system_qty: null, delta: null, suggestions
         });
     });
 
@@ -1127,6 +1197,7 @@ async function uploadStockCheck() {
         filename: file.name, row_count: entries.length, matched_count: matched, unmatched_count: unmatched
     });
 
+    hideProgress();
     lastStockCheckResults = results;
     renderStockCheckResults({ row_count: entries.length, matched_count: matched, unmatched_count: unmatched, results });
     analyzeBtn.disabled = false;
@@ -1176,7 +1247,7 @@ function renderStockCheckResults(data) {
 async function applyStockCheck() {
     const updates = lastStockCheckResults
         .filter(r => r.part_id !== null && r.input_qty !== null && r.match_type === 'exact')
-        .map(r => ({ part_id: r.part_id, new_qty: r.input_qty }));
+        .map(r => ({ id: r.part_id, stock_qty: r.input_qty }));
 
     if (updates.length === 0) {
         alert('No exact matches with a counted quantity to apply.');
@@ -1184,37 +1255,51 @@ async function applyStockCheck() {
     }
     if (!confirm(`Apply counted quantities to ${updates.length} part(s)? This overwrites system stock quantities.`)) return;
 
-    let applied = 0;
-    for (const u of updates) {
-        const { error } = await supabaseClient.from('parts').update({ stock_qty: u.new_qty }).eq('id', u.part_id);
-        if (!error) applied++;
-    }
-    alert(`Applied ${applied} update(s).`);
+    showProgress('Applying Counts...', `Updating ${updates.length} parts...`);
+    
+    // Batch updates concurrently to avoid partial row wiping via upsert
+    const { processed, failed } = await processInBatchesAsync(updates, 50, async (u) => {
+        return await supabaseClient.from('parts').update({ stock_qty: u.stock_qty }).eq('id', u.id);
+    }, (done, total) => {
+        updateProgress((done / total) * 100, `Updated ${done} of ${total} parts...`);
+    });
+
+    hideProgress();
+    alert(`Applied ${processed - failed} update(s).` + (failed > 0 ? ` Failed: ${failed}.` : ''));
+    
     loadStats();
     if (currentTab === 'parts') loadInventory();
     if (currentTab === 'low-stock') loadLowStock();
 }
 
 // ---------------------------------------------------------------------------
-// Full Stock List — export the whole inventory to Excel, edit it, re-upload
-// to review and apply changes (updates to existing parts, or new part rows).
+// Full Stock List
 // ---------------------------------------------------------------------------
 let lastStockListChanges = [];
 
 async function downloadStockListXlsx() {
-    const { data: parts, error } = await supabaseClient.from('parts').select('*').order('part_code');
-    if (error) { alert('Error loading parts: ' + error.message); return; }
+    showProgress('Exporting...', 'Fetching full stock list from database...');
+    try {
+        const parts = await fetchAllPages(supabaseClient.from('parts').select('*').order('part_code'));
+        updateProgress(50, `Formatting ${parts.length} parts...`);
+        
+        const rows = [['Part Code', 'Description', 'UoM', 'Stock Qty', 'Reorder Level', 'Unit Cost', 'Location']];
+        (parts || []).forEach(p => {
+            rows.push([p.part_code, p.description || '', p.uom || 'Nos', p.stock_qty, p.reorder_level, p.unit_cost, p.location || '']);
+        });
 
-    const rows = [['Part Code', 'Description', 'UoM', 'Stock Qty', 'Reorder Level', 'Unit Cost', 'Location']];
-    (parts || []).forEach(p => {
-        rows.push([p.part_code, p.description || '', p.uom || 'Nos', p.stock_qty, p.reorder_level, p.unit_cost, p.location || '']);
-    });
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 20 }, { wch: 40 }, { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 20 }];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Stock List');
-    XLSX.writeFile(wb, `Stock_List_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.xlsx`);
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws['!cols'] = [{ wch: 20 }, { wch: 40 }, { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 20 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Stock List');
+        
+        updateProgress(90, 'Generating file...');
+        XLSX.writeFile(wb, `Stock_List_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.xlsx`);
+    } catch (error) {
+        alert('Error generating export: ' + error.message);
+    } finally {
+        hideProgress();
+    }
 }
 
 async function compareStockList() {
@@ -1241,13 +1326,21 @@ async function compareStockList() {
         return;
     }
 
-    const { data: existingParts, error } = await supabaseClient.from('parts').select('*');
-    if (error) {
+    showProgress('Analyzing File...', 'Fetching current inventory for comparison...');
+    
+    let existingParts;
+    try {
+        existingParts = await fetchAllPages(supabaseClient.from('parts').select('*'));
+    } catch (error) {
         resultsDiv.innerHTML = `<p style="color: var(--danger);">Error loading current parts: ${error.message}</p>`;
         btn.disabled = false;
         btn.innerText = 'Compare & Preview Changes';
+        hideProgress();
         return;
     }
+    
+    updateProgress(50, `Comparing rows...`);
+
     const byNorm = {};
     existingParts.forEach(p => { byNorm[normalizeCode(p.part_code)] = p; });
 
@@ -1255,7 +1348,7 @@ async function compareStockList() {
     rows.forEach(row => {
         const cells = row.map(c => (c === null || c === undefined) ? '' : String(c).trim());
         if (!cells.length || !cells[0]) return;
-        if (['code', 'part code', 'part_code'].includes(cells[0].toLowerCase())) return; // header row
+        if (['code', 'part code', 'part_code'].includes(cells[0].toLowerCase())) return; 
 
         const [rawCode, rawDesc, rawUom, rawStock, rawReorder, rawCost, rawLocation] = cells;
         const norm = normalizeCode(rawCode);
@@ -1289,9 +1382,6 @@ async function compareStockList() {
             return;
         }
 
-        // No code match — check your real convention first: is this code actually
-        // embedded inside an existing part's Description? If so, it's an update to
-        // that part, not a new one.
         const embeddedMatch = findMatchInDescriptions(rawCode, existingParts);
         if (embeddedMatch) {
             const diffs = [`Matched via description to existing part ${embeddedMatch.part_code}`];
@@ -1311,8 +1401,6 @@ async function compareStockList() {
             return;
         }
 
-        // Still no match — check if the description strongly resembles an existing
-        // part's, which usually means the code was retyped wrong rather than being new.
         const descSuggestion = newDesc ? getCloseDescriptionMatches(newDesc, existingParts, 1, 0.6)[0] : null;
         changes.push({
             type: 'new',
@@ -1324,6 +1412,7 @@ async function compareStockList() {
         });
     });
 
+    hideProgress();
     lastStockListChanges = changes;
     btn.disabled = false;
     btn.innerText = 'Compare & Preview Changes';
@@ -1366,20 +1455,44 @@ async function applyStockListChanges() {
     if (checkedIdxs.length === 0) { alert('Select at least one row to apply.'); return; }
     if (!confirm(`Apply ${checkedIdxs.length} change(s) to inventory?`)) return;
 
-    let updated = 0, added = 0, failed = 0;
+    showProgress('Applying Changes...', `Writing ${checkedIdxs.length} updates...`);
+    const toInsert = [];
+    const toUpdate = [];
+
     for (const idx of checkedIdxs) {
         const change = lastStockListChanges[idx];
         if (!change) continue;
         if (change.type === 'update') {
-            const { error } = await supabaseClient.from('parts').update(change.payload).eq('id', change.part_id);
-            if (error) { failed++; console.error(error.message); } else updated++;
+            toUpdate.push({ id: change.part_id, payload: change.payload });
         } else {
-            const { error } = await supabaseClient.from('parts').insert(change.payload);
-            if (error) { failed++; console.error(error.message); } else added++;
+            toInsert.push(change.payload);
         }
     }
 
+    let added = 0, updated = 0, failed = 0;
+
+    // Batch inserts
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
+        const chunk = toInsert.slice(i, i + CHUNK_SIZE);
+        const { error } = await supabaseClient.from('parts').insert(chunk);
+        if (error) { failed += chunk.length; console.error(error.message); } else added += chunk.length;
+        updateProgress((i / (toInsert.length + toUpdate.length)) * 100, `Adding new parts...`);
+    }
+
+    // Batch async updates 
+    const updateStats = await processInBatchesAsync(toUpdate, 50, async (u) => {
+        return await supabaseClient.from('parts').update(u.payload).eq('id', u.id);
+    }, (done, total) => {
+        updateProgress(((toInsert.length + done) / (toInsert.length + toUpdate.length)) * 100, `Updating existing parts...`);
+    });
+
+    updated = updateStats.processed - updateStats.failed;
+    failed += updateStats.failed;
+
+    hideProgress();
     alert(`Updated ${updated} part(s), added ${added} new part(s)` + (failed ? `, ${failed} failed (see browser console).` : '.'));
+    
     document.getElementById('stock-list-results').innerHTML = '';
     document.getElementById('stock-list-file').value = '';
     loadStats();
@@ -1415,19 +1528,11 @@ function closeScanner() {
     if (html5QrcodeScanner) html5QrcodeScanner.clear();
 }
 
-// ---------------------------------------------------------------------------
-// Scan manuals for spare parts (client-side PDF text extraction + pattern matching)
-// ---------------------------------------------------------------------------
 if (window.pdfjsLib) {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
         'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 }
 
-// Extracts the PDF's text, grouped into approximate lines by y-position,
-// since pdf.js only gives a flat stream of positioned text fragments.
-// isEvalSupported: false mitigates CVE-2024-4367 (a code-injection issue in
-// this pdf.js version's path-resolution logic) — required since we now also
-// render pages to canvas for OCR, not just read their text layer.
 async function extractPdfLines(url, onProgress) {
     const pdf = await pdfjsLib.getDocument({ url, isEvalSupported: false }).promise;
     const lines = [];
@@ -1451,12 +1556,6 @@ async function extractPdfLines(url, onProgress) {
     return lines.filter(l => l.length > 0);
 }
 
-// Heuristic pattern matching over the extracted lines. Three passes, most
-// reliable first:
-//   "table" confidence — structured "POS  CODE  DESCRIPTION  QTY [unit]" rows,
-//                         the standard layout used in most spare-parts manuals
-//   "high"  confidence — lines with an explicit label like "Part No:", "P/N", "Item No:"
-//   "low"   confidence — general alphanumeric-code-looking tokens on short lines
 function extractPartCandidates(lines) {
     const candidates = [];
     const seen = new Set();
@@ -1498,11 +1597,11 @@ function extractPartCandidates(lines) {
                     confidence: 'high'
                 });
             }
-            return; // labeled line already handled — skip the general scan for it
+            return; 
         }
 
         const wordCount = line.split(/\s+/).length;
-        if (wordCount > 12) return; // likely prose, not a parts-list row
+        if (wordCount > 12) return; 
 
         const matches = line.match(codeTokenRe);
         if (!matches) return;
@@ -1521,13 +1620,9 @@ function extractPartCandidates(lines) {
         });
     });
 
-    return candidates.slice(0, 200); // cap noise on very large/dense manuals
+    return candidates.slice(0, 200); 
 }
 
-// OCR fallback for scanned manuals with no embedded text layer. Renders each
-// page to a canvas with pdf.js, then runs Tesseract.js (WASM) over the image.
-// Much slower than text extraction — seconds per page, plus a one-time
-// download of the OCR engine and language data on first use.
 async function ocrPdfLines(url, onProgress) {
     const pdf = await pdfjsLib.getDocument({ url, isEvalSupported: false }).promise;
     const lines = [];
@@ -1626,10 +1721,7 @@ async function scanManualForParts(publicUrl, machineId, assemblyLabel, forceOcr)
             `Table rows and explicit "Part No"/"P/N" labels are pre-checked — review the rest before adding.` +
             (usedOcr ? ' Results came from OCR, so double-check codes for recognition mistakes (e.g. "0" vs "O", "1" vs "I").' : '');
 
-        // Resolve each manual code against existing inventory before rendering,
-        // checking both the Item No./code field and whether it's embedded inside
-        // any part's Description — your actual convention for how these are filed.
-        const { data: existingParts } = await supabaseClient.from('parts').select('id, part_code, description');
+        const existingParts = await fetchAllPages(supabaseClient.from('parts').select('id, part_code, description'));
         const byNormCode = {};
         (existingParts || []).forEach(p => { byNormCode[normalizeCode(p.part_code)] = p; });
 
@@ -1726,7 +1818,9 @@ async function confirmAddCandidateParts() {
         if (!proceed) return;
     }
 
-    const { data: existingParts } = await supabaseClient.from('parts').select('id, part_code');
+    showProgress('Adding Parts...', 'Linking and inserting candidate parts...');
+
+    const existingParts = await fetchAllPages(supabaseClient.from('parts').select('id, part_code'));
     const byNorm = {};
     (existingParts || []).forEach(p => { byNorm[normalizeCode(p.part_code)] = p; });
 
@@ -1740,7 +1834,9 @@ async function confirmAddCandidateParts() {
     }
 
     let added = 0, matched = 0, linked = 0, skipped = 0;
-    for (const cand of selected) {
+    
+    for (let i = 0; i < selected.length; i++) {
+        const cand = selected[i];
         if (!cand.sapCode) { skipped++; continue; }
         const norm = normalizeCode(cand.sapCode);
         let partId;
@@ -1773,8 +1869,10 @@ async function confirmAddCandidateParts() {
                 linked++;
             }
         }
+        updateProgress((i / selected.length) * 100, `Processed ${i + 1} of ${selected.length} items...`);
     }
 
+    hideProgress();
     alert(
         `Added ${added} new part(s), matched ${matched} already in inventory` +
         (assemblyId ? `, linked ${linked} to this machine` : '') +
