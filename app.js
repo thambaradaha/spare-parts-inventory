@@ -10,6 +10,7 @@ let lastStockCheckResults = [];
 let currentUserProfile = null; // { id, email, full_name, role, approved }
 
 document.addEventListener('DOMContentLoaded', () => {
+    handleAuthRedirectError();
     checkSession();
     const bdDate = document.getElementById('bd-reported-at');
     if (bdDate) {
@@ -23,6 +24,29 @@ document.addEventListener('DOMContentLoaded', () => {
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
+// Supabase redirects here with an error in the URL hash if a confirmation/
+// magic link was expired or already used (e.g. #error=access_denied&error_
+// code=otp_expired...). Without this, the person just sees a blank login
+// screen (or, if Site URL is also misconfigured, a browser connection error)
+// with no explanation at all.
+function handleAuthRedirectError() {
+    const hash = window.location.hash;
+    if (!hash || !hash.includes('error=')) return;
+
+    const params = new URLSearchParams(hash.substring(1));
+    const description = params.get('error_description');
+
+    if (description) {
+        const errorEl = document.getElementById('login-error');
+        errorEl.innerText = description.replace(/\+/g, ' ') +
+            ' — please sign up again, or ask an admin to check your account.';
+        errorEl.style.display = 'block';
+    }
+
+    // Strip the error out of the URL bar so refreshing/sharing the link doesn't repeat it.
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+
 async function checkSession() {
     const { data: { session } } = await supabaseClient.auth.getSession();
     if (!session) {
@@ -38,7 +62,10 @@ async function loadProfileAndEnter(user) {
         .from('profiles').select('*').eq('id', user.id).single();
 
     if (error || !profile) {
-        document.getElementById('auth-loading').innerText = 'Could not load your account. Try signing in again.';
+        document.getElementById('auth-loading').innerHTML =
+            'Could not load your account. This usually means the database setup isn\'t finished yet — ' +
+            'ask your admin to check the setup steps, or try again below.' +
+            '<br><button class="btn-secondary" style="margin-top:12px;" onclick="handleLogout()">Sign Out &amp; Try Again</button>';
         return;
     }
 
