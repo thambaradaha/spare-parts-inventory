@@ -7,11 +7,207 @@ let currentTab = 'parts';
 let paretoChartInstance = null;
 let html5QrcodeScanner = null;
 let lastStockCheckResults = [];
+let currentUserProfile = null; // { id, email, full_name, role, approved }
 
 document.addEventListener('DOMContentLoaded', () => {
+    checkSession();
+    const bdDate = document.getElementById('bd-reported-at');
+    if (bdDate) {
+        // datetime-local expects "YYYY-MM-DDTHH:mm" in local time
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        bdDate.value = now.toISOString().slice(0, 16);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+async function checkSession() {
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) {
+        document.getElementById('auth-loading').style.display = 'none';
+        document.getElementById('auth-forms').style.display = 'block';
+        return;
+    }
+    await loadProfileAndEnter(session.user);
+}
+
+async function loadProfileAndEnter(user) {
+    const { data: profile, error } = await supabaseClient
+        .from('profiles').select('*').eq('id', user.id).single();
+
+    if (error || !profile) {
+        document.getElementById('auth-loading').innerText = 'Could not load your account. Try signing in again.';
+        return;
+    }
+
+    currentUserProfile = profile;
+
+    if (!profile.approved) {
+        document.getElementById('auth-loading').style.display = 'none';
+        document.getElementById('auth-forms').style.display = 'none';
+        document.getElementById('auth-pending').style.display = 'block';
+        return;
+    }
+
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-shell').style.display = 'block';
+    document.getElementById('current-user-label').innerText = `${profile.email} (${profile.role})`;
+    document.getElementById('nav-users').style.display = profile.role === 'admin' ? 'block' : 'none';
+
+    if (profile.role !== 'admin') {
+        const deleteAllBtn = document.getElementById('delete-all-parts-btn');
+        const selectAllBox = document.getElementById('parts-select-all');
+        if (deleteAllBtn) deleteAllBtn.style.display = 'none';
+        if (selectAllBox) selectAllBox.style.display = 'none';
+    }
+
     loadMachinesDropdown();
     loadAllData();
-});
+}
+
+function showLoginForm() {
+    document.getElementById('auth-login-form').style.display = 'block';
+    document.getElementById('auth-signup-form').style.display = 'none';
+}
+
+function showSignupForm() {
+    document.getElementById('auth-login-form').style.display = 'none';
+    document.getElementById('auth-signup-form').style.display = 'block';
+}
+
+async function handleLogin() {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+    errorEl.style.display = 'none';
+
+    if (!email || !password) { errorEl.innerText = 'Enter your email and password.'; errorEl.style.display = 'block'; return; }
+
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) { errorEl.innerText = error.message; errorEl.style.display = 'block'; return; }
+
+    await supabaseClient.from('login_log').insert({ user_id: data.user.id, email: data.user.email });
+    await loadProfileAndEnter(data.user);
+}
+
+async function handleSignup() {
+    const fullName = document.getElementById('signup-name').value.trim();
+    const email = document.getElementById('signup-email').value.trim();
+    const password = document.getElementById('signup-password').value;
+    const errorEl = document.getElementById('signup-error');
+    errorEl.style.display = 'none';
+
+    if (!email || !password) { errorEl.innerText = 'Enter an email and password.'; errorEl.style.display = 'block'; return; }
+    if (password.length < 6) { errorEl.innerText = 'Password must be at least 6 characters.'; errorEl.style.display = 'block'; return; }
+
+    const { data, error } = await supabaseClient.auth.signUp({ email, password });
+    if (error) { errorEl.innerText = error.message; errorEl.style.display = 'block'; return; }
+
+    if (fullName && data.user) {
+        await supabaseClient.from('profiles').update({ full_name: fullName }).eq('id', data.user.id);
+    }
+
+    if (!data.session) {
+        // Supabase project has "Confirm email" enabled — no session until they click the email link.
+        document.getElementById('auth-forms').style.display = 'none';
+        document.getElementById('auth-pending').querySelector('p').innerText =
+            'Account created. Check your email to confirm it, then sign in — an admin will still need to approve your account after that.';
+        document.getElementById('auth-pending').style.display = 'block';
+        return;
+    }
+
+    await loadProfileAndEnter(data.user);
+}
+
+async function handleLogout() {
+    await supabaseClient.auth.signOut();
+    currentUserProfile = null;
+    document.getElementById('app-shell').style.display = 'none';
+    document.getElementById('auth-pending').style.display = 'none';
+    document.getElementById('auth-forms').style.display = 'block';
+    document.getElementById('auth-loading').style.display = 'none';
+    showLoginForm();
+    document.getElementById('login-email').value = '';
+    document.getElementById('login-password').value = '';
+}
+
+function isAdmin() {
+    return !!(currentUserProfile && currentUserProfile.role === 'admin');
+}
+
+// ---------------------------------------------------------------------------
+// Users (admin only)
+// ---------------------------------------------------------------------------
+async function loadUsersTab() {
+    if (!isAdmin()) return;
+
+    const allUsers = await fetchAllRows(() => supabaseClient.from('profiles').select('*').order('created_at'));
+
+    const pendingTbody = document.getElementById('pending-users-tbody');
+    const pending = allUsers.filter(u => !u.approved);
+    pendingTbody.innerHTML = pending.length === 0
+        ? `<tr class="empty-row"><td colspan="4">No pending sign-ups.</td></tr>`
+        : pending.map(u => `<tr>
+            <td>${u.email}</td>
+            <td>${u.full_name || '-'}</td>
+            <td>${new Date(u.created_at).toLocaleString()}</td>
+            <td><button class="btn-primary" onclick="approveUser('${u.id}')">Approve</button></td>
+        </tr>`).join('');
+
+    const allTbody = document.getElementById('all-users-tbody');
+    allTbody.innerHTML = allUsers.length === 0
+        ? `<tr class="empty-row"><td colspan="5">No users yet.</td></tr>`
+        : allUsers.map(u => {
+            const statusBadge = u.approved
+                ? `<span class="badge resolved">Approved</span>`
+                : `<span class="badge open">Pending</span>`;
+            const isSelf = currentUserProfile && u.id === currentUserProfile.id;
+            const roleBtn = u.role === 'admin'
+                ? `<button class="btn-secondary" ${isSelf ? 'disabled title="You cannot demote yourself"' : ''} onclick="setUserRole('${u.id}', 'user')">Make User</button>`
+                : `<button class="btn-secondary" onclick="setUserRole('${u.id}', 'admin')">Make Admin</button>`;
+            const revokeBtn = u.approved
+                ? `<button class="btn-danger" ${isSelf ? 'disabled title="You cannot revoke yourself"' : ''} onclick="revokeUser('${u.id}')">Revoke</button>`
+                : '';
+            return `<tr>
+                <td>${u.email}</td>
+                <td>${u.full_name || '-'}</td>
+                <td>${u.role}</td>
+                <td>${statusBadge}</td>
+                <td style="display:flex; gap:6px; flex-wrap:wrap;">${roleBtn}${revokeBtn}</td>
+            </tr>`;
+        }).join('');
+
+    const logRows = await fetchAllRows(() =>
+        supabaseClient.from('login_log').select('email, logged_in_at').order('logged_in_at', { ascending: false })
+    );
+    const logTbody = document.getElementById('login-log-tbody');
+    const recentLogs = logRows.slice(0, 50);
+    logTbody.innerHTML = recentLogs.length === 0
+        ? `<tr class="empty-row"><td colspan="2">No logins recorded yet.</td></tr>`
+        : recentLogs.map(l => `<tr><td>${l.email || '-'}</td><td>${new Date(l.logged_in_at).toLocaleString()}</td></tr>`).join('');
+}
+
+async function approveUser(userId) {
+    const { error } = await supabaseClient.from('profiles').update({ approved: true }).eq('id', userId);
+    if (error) { alert('Error: ' + error.message); return; }
+    loadUsersTab();
+}
+
+async function setUserRole(userId, role) {
+    if (!confirm(`Change this user's role to "${role}"?`)) return;
+    const { error } = await supabaseClient.from('profiles').update({ role }).eq('id', userId);
+    if (error) { alert('Error: ' + error.message); return; }
+    loadUsersTab();
+}
+
+async function revokeUser(userId) {
+    if (!confirm('Revoke this user\'s access? They will need to be re-approved to use the app again.')) return;
+    const { error } = await supabaseClient.from('profiles').update({ approved: false }).eq('id', userId);
+    if (error) { alert('Error: ' + error.message); return; }
+    loadUsersTab();
+}
 
 function switchTab(tabId) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -30,6 +226,7 @@ async function loadAllData() {
     if (currentTab === 'failure-frequency') loadFailureFrequency();
     if (currentTab === 'machines') loadMachinesTable();
     if (currentTab === 'manuals') loadManuals();
+    if (currentTab === 'users') loadUsersTab();
 }
 
 // ---------------------------------------------------------------------------
@@ -261,12 +458,18 @@ function renderInventoryPage() {
     document.getElementById('parts-count-label').innerText = `Showing ${start + 1}-${end} of ${total} part(s)`;
 
     currentInventoryData.slice(start, end).forEach(p => {
+        const checkboxCell = isAdmin()
+            ? `<input type="checkbox" class="part-checkbox" data-id="${p.id}" data-code="${p.part_code.replace(/"/g, '&quot;')}" onchange="updateBulkDeleteButton()">`
+            : '';
+        const deleteCell = isAdmin()
+            ? `<button class="btn-danger" onclick="deletePart(${p.id}, '${p.part_code.replace(/'/g, "\\'")}')">Delete</button>`
+            : '';
         tbody.innerHTML += `<tr>
-            <td><input type="checkbox" class="part-checkbox" data-id="${p.id}" data-code="${p.part_code.replace(/"/g, '&quot;')}" onchange="updateBulkDeleteButton()"></td>
+            <td>${checkboxCell}</td>
             <td>${p.part_code}</td><td>${p.description || '-'}</td><td>${p.uom || 'Nos'}</td>
             <td>${p.stock_qty}</td><td>${p.reorder_level}</td><td>$${p.unit_cost || '0.00'}</td>
             <td><button class="btn-secondary" onclick="downloadQr('${p.part_code.replace(/'/g, "\\'")}')">⬇️</button></td>
-            <td><button class="btn-danger" onclick="deletePart(${p.id}, '${p.part_code.replace(/'/g, "\\'")}')">Delete</button></td>
+            <td>${deleteCell}</td>
         </tr>`;
     });
 }
@@ -314,6 +517,57 @@ async function bulkDeleteParts() {
     const { error } = await supabaseClient.from('parts').delete().in('id', ids);
     if (error) { alert('Error: ' + error.message); return; }
 
+    loadInventory();
+    loadStats();
+}
+
+// Deletes every part matching the CURRENT search/machine filter (same scoping
+// as the Parts tab listing) — not just the current page. Falls back to your
+// entire inventory when no filter is set. Batched and progress-tracked since
+// this can touch thousands of rows at once.
+async function deleteAllParts() {
+    const machineId = document.getElementById('global-machine-select').value;
+    const q = document.getElementById('part-search-input').value.trim();
+    const partIds = await scopedPartIds(machineId);
+
+    if (partIds !== null && partIds.length === 0) { alert('No parts match the current filter.'); return; }
+
+    const targetParts = await fetchAllRows(() => {
+        let query = supabaseClient.from('parts').select('id, part_code');
+        if (partIds !== null) query = query.in('id', partIds);
+        if (q) query = query.or(`part_code.ilike.%${q}%,description.ilike.%${q}%`);
+        return query;
+    });
+
+    if (targetParts.length === 0) { alert('No parts match the current filter.'); return; }
+
+    const isFiltered = q || (machineId && machineId !== 'all' && machineId !== '0');
+    const scopeNote = isFiltered
+        ? `matching the current filter${q ? ` (search "${q}")` : ''}`
+        : 'in your ENTIRE inventory';
+
+    const typed = prompt(
+        `This will permanently delete ${targetParts.length} part(s) ${scopeNote}.\n\n` +
+        `This also removes them from any assemblies they're linked to. Past breakdown records ` +
+        `that reference them are kept, just unlinked from the deleted parts.\n\n` +
+        `This cannot be undone. Type DELETE ALL (in capitals) to confirm:`
+    );
+    if (typed !== 'DELETE ALL') { alert('Cancelled — confirmation text did not match, nothing was deleted.'); return; }
+
+    showGlobalProgress('Deleting Parts');
+    const ids = targetParts.map(p => p.id);
+    const batches = chunkArray(ids, 500);
+    let processed = 0, failed = 0;
+
+    for (const batch of batches) {
+        const { error } = await supabaseClient.from('parts').delete().in('id', batch);
+        if (error) { failed += batch.length; console.error(error.message); }
+        processed += batch.length;
+        updateGlobalProgress(processed, ids.length, `Deleting part ${processed} of ${ids.length}...`);
+    }
+
+    hideGlobalProgress();
+    alert(`Deleted ${processed - failed} part(s)` + (failed ? `, ${failed} failed (see browser console).` : '.'));
     loadInventory();
     loadStats();
 }
@@ -1015,13 +1269,16 @@ async function loadMachinesTable() {
         return;
     }
     data.forEach(m => {
+        const deleteCell = isAdmin()
+            ? `<button class="btn-danger" onclick="deleteMachine(${m.id}, '${m.name.replace(/'/g, "\\'")}')">Delete</button>`
+            : '';
         tbody.innerHTML += `<tr>
             <td>${m.name}</td>
             <td>${m.model || '-'}</td>
             <td>${m.serial_number || '-'}</td>
             <td>${m.manufacturer || '-'}</td>
             <td>${m.year_built || '-'}</td>
-            <td><button class="btn-danger" onclick="deleteMachine(${m.id}, '${m.name.replace(/'/g, "\\'")}')">Delete</button></td>
+            <td>${deleteCell}</td>
         </tr>`;
     });
 }
